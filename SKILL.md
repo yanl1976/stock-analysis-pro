@@ -1,13 +1,13 @@
 ---
 name: chinese-stock-analysis
-version: 1.1.0
-description: A股全维度分析工具 — 个股分析、概念板块扫描、宏观市场概览
+version: 3.0.0
+description: A股全维度分析工具 — 个股分析、概念板块扫描、宏观市场概览、每日复盘、ETF期权扫描
 category: research
 ---
 
 # chinese-stock-analysis (stock-analysis-pro)
 
-A股全维度分析工具，覆盖个股深度分析、概念板块扫描、宏观市场概览三大核心功能。
+A股全维度分析 + ETF 期权分析工具，覆盖个股深度分析、概念板块扫描、宏观市场概览、每日复盘、ETF 期权扫描五大核心功能。
 
 ---
 
@@ -69,6 +69,22 @@ python core/cli.py analyze 600519 --html
 所有命令在项目根目录下执行：
 
 ```bash
+# ── 每日复盘 ──
+python core/cli.py review              # 文本输出
+python core/cli.py review --html       # HTML 报告（推荐，微信/浏览器查看）
+
+# ── ETF 期权扫描 ──
+python core/cli.py options             # 全合约扫描（卖方+买方机会）
+python core/cli.py options --top 10    # 取前10个
+python core/cli.py options --symbol 510050  # 指定标的（默认自动检测）
+
+# ── 持仓管理 ──
+python core/cli.py portfolio           # 查看持仓（默认list）
+python core/cli.py portfolio --action list   # 查看持仓
+python core/cli.py portfolio --action add --code 603893 --name 瑞芯微
+python core/cli.py portfolio --action rm --code 603893
+python core/cli.py portfolio --action update --code 603893 --cost 120 --shares 100
+
 # ── 个股分析 ──
 python core/cli.py analyze 600519          # 全维度分析 (文本)
 python core/cli.py analyze 600519 --html   # HTML 报告
@@ -112,12 +128,67 @@ collectors/          analysis/           plans/
 | 东财 guba | 股吧热帖 (Playwright) | Playwright拦截 | ✅ |
 | 东财 search-api | 概念新闻 | 直连 | ✅ |
 | 东财 push2 | 概念资金流 | Cookie+JSONP | ✅ |
+| 东财 行情页 | 涨跌家数+涨跌停 | Playwright | ✅ |
 | akshare THS | 财务/分红/预测 | 需代理 | ✅ |
 | akshare 涨停池 | 涨跌停统计 | 需代理 | ✅ |
+| akshare 期权 | IV/HV/Greeks | 需代理 | ✅ |
+| 新浪 期权 | 全合约列表 | 直连 | ✅ |
 
 ---
 
 ## 分析维度
+
+### 每日复盘 (review)
+
+每日收盘后自动生成综合报告，包含：
+
+1. **指数概览** — 上证/深证/创业板/科创50 实时行情
+2. **涨跌统计** — 涨跌家数、涨停跌停数、赚钱效应分析
+3. **概念资金流** — 资金净流入 Top10 概念板块
+4. **持仓跟踪** — 当日持仓盈亏、涨跌、风险提示
+5. **自选股监控** — 自选股列表及表现
+6. **宏观指标** — 北向资金、市场情绪、关键事件
+
+输出格式：
+- 文本模式：终端查看，紧凑格式
+- HTML 模式：可视化报告，暗色主题，支持微信/浏览器查看
+
+数据来源：
+- 指数行情：腾讯 qt.gtimg.cn
+- 涨跌家数：Playwright 访问东财行情页
+- 涨跌停数据：Playwright 拦截东财页面
+- 概念资金流：东财 push2 API (需 Cookie)
+- 持仓数据：`data/portfolio.json`
+
+### ETF 期权扫描 (options)
+
+全市场 ETF 期权合约扫描，寻找高胜率交易机会：
+
+**卖方机会分析**（卖出期权赚时间价值）：
+- IV > HV 的虚值期权（时间价值高估）
+- 按时间价值/天排序，找出衰减最快的合约
+- 风险提示：Delta 暴露、Gamma 风险、跳空风险
+
+**买方机会分析**（买入期权赌方向）：
+- IV < HV 的平值/浅虚值期权（波动率低估）
+- 近期事件驱动（财报、政策、技术突破）
+- 按性价比排序（预期收益/权利金）
+
+**风险指标**：
+- Delta：方向暴露
+- Gamma：Delta 变化速度
+- Theta：时间价值衰减/天
+- Vega：波动率敏感度
+
+**过滤规则**：
+- 剩余天数 > 7 天（避免末日轮）
+- 成交量 > 100 手（流动性）
+- 持仓量 > 500 手（市场关注度）
+
+数据来源：
+- 全合约列表：新浪期权频道
+- IV/HV/Greeks：akshare 期权数据
+- 标的行情：腾讯 qt.gtimg.cn
 
 ### 个股分析 (analyze)
 
