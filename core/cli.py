@@ -70,6 +70,8 @@ def main():
     parser.add_argument("--summary", action="store_true", help="Compact JSON summary for agent consumption")
     parser.add_argument("--html", action="store_true", help="Generate HTML report file (outputs file path to stdout)")
     parser.add_argument("--top", type=int, default=10, help="Top N results (options/concept)")
+    parser.add_argument("--stage", choices=["all", "list", "detail"], default="all",
+                        help="concept: all=一步完成(默认); list=快速仅榜单; detail=慢速拉成分股(需先list)")
     parser.add_argument("--action", choices=["add", "rm", "list", "update"], help="Portfolio action")
     parser.add_argument("--name", help="Portfolio stock name")
     parser.add_argument("--cost", type=float, help="Portfolio cost")
@@ -122,7 +124,7 @@ def main():
 
         elif args.command == "concept":
             from plans.concept_analysis import run as run_concept, format_report
-            data = run_concept(verbose=False)
+            data = run_concept(target_count=args.top, verbose=False, stage=args.stage)
             if args.html:
                 from core.html_renderer import render
                 path = render(data, "concept_report")

@@ -78,50 +78,98 @@ def filter_concepts(concepts):
     return res
 
 
-def run(target_count=10, verbose=True, use_cache=True):
+def run(target_count=10, verbose=True, use_cache=True, stage='all'):
     """
     执行概念板块分析 (含深度选股分析)
-    
+
+    支持两步式执行 (推荐, 避免单次运行过久):
+    - stage='list'   : 快速模式, 仅抓取概念榜单 (不拉成分股, 秒级)
+    - stage='detail' : 慢速模式, 读取榜单缓存, 再逐个拉成分股做深度分析
+    - stage='all'    : 一次性完成 (默认, 兼容旧调用)
+
     流程:
     1. 概念排名 (映射表+腾讯行情) → Top N
     2. 新闻归因 (东财搜索API)
     3. 深度分析 (成分股K线+选股)
     4. 板块趋势定性
-    
+
     返回: {date, concepts: [{name, ..., deep_analysis}, ...]}
     """
     date_str = datetime.now().strftime('%Y-%m-%d')
-    cache_key = f"concept_deep_{date_str}_{target_count}"
-
-    if use_cache:
-        cached = _cache_get(cache_key)
-        if cached:
-            if verbose:
-                print(f"  [缓存命中] {cache_key}")
-            return cached
+    list_cache_key = f"concept_list_{date_str}"
+    deep_cache_key = f"concept_deep_{date_str}_{target_count}"
 
     if verbose:
-        print(f"[{date_str}] 概念板块深度分析启动...")
+        print(f"[{date_str}] 概念板块分析启动 (stage={stage})...")
 
     # 清空K线缓存
     clear_kline_cache()
 
-    # === Step 1+1.5: 用Playwright获取概念列表 + 过滤 + 对top N拉成分股 ===
-    if verbose:
-        print("  Step 1: 获取概念列表 + 成分股 (Playwright, 两次浏览器会话)...")
+    # === 第一步: 仅抓概念榜单 (快速) ===
+    if stage in ('list', 'all'):
+        if use_cache and stage == 'list':
+            cached_list = _cache_get(list_cache_key)
+            if cached_list:
+                if verbose:
+                    print(f"  [缓存命中] {list_cache_key}")
+                return cached_list
+
+        if verbose:
+            print("  Step 1: 获取概念榜单 (requests, 仅列表, 秒级)...")
+        from collectors.em_concept import fetch_concept_list
+
+        # 纯 requests 调 push2 clist 接口, 字段完整(涨跌幅/领涨股), 无需 Playwright
+        raw = fetch_concept_list(top_n=target_count * 3, verbose=verbose)
+        top = filter_concepts(raw)[:target_count]
+
+        list_out = {
+            "date": date_str,
+            "stage": "list",
+            "concepts": [
+                {
+                    'name': c['name'],
+                    'bk_code': c['bk_code'],
+                    'change_pct': c.get('change_pct', 0),
+                    'net_inflow': c.get('net_inflow', 0),
+                    'up_count': c.get('up_count', 0),
+                    'down_count': c.get('down_count', 0),
+                    'leader': c.get('leader', ''),
+                    'leader_code': c.get('leader_code', ''),
+                }
+                for c in top
+            ],
+            "count": len(top),
+        }
+        _cache_set(list_cache_key, list_out)
+
+        if stage == 'list':
+            return list_out
+
+    # === 第二步: 拉成分股 + 深度分析 (慢速) ===
+    if stage == 'detail':
+        cached_list = _cache_get(list_cache_key) if use_cache else None
+        if not cached_list:
+            print("\n  ⚠️ 未找到榜单缓存，请先运行 stage='list' (python core/cli.py concept --stage list)")
+            return {"error": "未找到榜单缓存，请先运行快速模式", "date": date_str}
+        top = cached_list.get('concepts', [])
+        if verbose:
+            print(f"  [读取榜单缓存] {len(top)} 个概念, 开始拉成分股...")
+
     from collectors.em_concept import fetch_concepts_batch
 
     def _filter_and_pick(concepts):
         filtered = filter_concepts(concepts)
         return filtered[:target_count]
 
+    # 拉成分股 (Playwright, 逐个板块, 间隔5秒)
+    if verbose:
+        print("  Step 2: 拉取成分股 (Playwright, 逐个板块)...")
     batch = fetch_concepts_batch(
         top_n=60,
         stocks_limit=100,
         verbose=verbose,
-        filter_fn=_filter_and_pick,
+        fetch_stocks_for=[{'bk_code': c['bk_code'], 'name': c['name']} for c in top],
     )
-    top = batch.get('filtered', [])
     stocks_map = batch.get('stocks_map', {})
 
     if not top:
@@ -232,8 +280,8 @@ def run(target_count=10, verbose=True, use_cache=True):
 
     output = {"date": date_str, "concepts": results, "count": len(results)}
 
-    if use_cache:
-        _cache_set(cache_key, output)
+    if use_cache and stage != 'list':
+        _cache_set(deep_cache_key, output)
 
     return output
 
