@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+{% block title %}每日复盘 — {{ data.get('date', '') }}{% endblock %}
+{% block body %}
+{% macro fmt_pct(v) %}{% if v is not none and v != 0 %}{{ '%+.2f'|format(v) }}%{% else %}--{% endif %}{% endmacro %}
+{% macro fmt_yi(v) %}{% if v is not none and v != 0 %}{{ '%.2f'|format(v / 100000000) }}亿{% else %}--{% endif %}{% endmacro %}
+{% macro pct_color(v) %}{% if v is not none and v > 0 %}up{% elif v is not none and v < 0 %}down{% else %}flat{% endif %}{% endmacro %}
+
+{# ===== HEADER ===== #}
+<div class="header">
+  <h1>📋 每日复盘</h1>
+  <div class="subtitle">{{ data.get('date', '') }}</div>
+</div>
+
+{# ===== 1. 指数概览 ===== #}
+{% set indices = data.get('indices', []) %}
+{% if indices %}
+<div class="section">
+  <div class="section-title"><span class="icon">📊</span> 指数概览</div>
+  <div class="metric-grid cols-{{ [indices|length, 4]|min }}">
+    {% for idx in indices %}
+    <div class="metric-item">
+      <div class="label">{{ idx.name }}</div>
+      <div class="value {{ pct_color(idx.change_pct) }}">{{ '%.2f'|format(idx.price) }}</div>
+      <div class="item-meta {{ pct_color(idx.change_pct) }}">{{ fmt_pct(idx.change_pct) }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{# ===== 2. 市场宽度 ===== #}
+{% set breadth = data.get('breadth', {}) %}
+{% if breadth.up or breadth.down %}
+<div class="section">
+  <div class="section-title"><span class="icon">📈</span> 市场宽度</div>
+  <div class="metric-grid cols-5">
+    <div class="metric-item">
+      <div class="label">上涨</div>
+      <div class="value up">{{ breadth.up }}</div>
+    </div>
+    <div class="metric-item">
+      <div class="label">下跌</div>
+      <div class="value down">{{ breadth.down }}</div>
+    </div>
+    <div class="metric-item">
+      <div class="label">平盘</div>
+      <div class="value flat">{{ breadth.get('flat', 0) }}</div>
+    </div>
+    <div class="metric-item">
+      <div class="label">涨停</div>
+      <div class="value up">{{ breadth.get('limit_up', 0) }}</div>
+    </div>
+    <div class="metric-item">
+      <div class="label">跌停</div>
+      <div class="value down">{{ breadth.get('limit_down', 0) }}</div>
+    </div>
+  </div>
+  {% set total = breadth.up + breadth.down + breadth.get('flat', 0) %}
+  {% if total > 0 %}
+  <div style="padding:8px 16px;font-size:12px;color:var(--text-secondary);border-top:1px solid var(--card-border);">
+    涨跌比: {{ breadth.up }}:{{ breadth.down }}
+    {% if breadth.up > breadth.down * 2 %}
+    <span class="up"> · 强势市场</span>
+    {% elif breadth.down > breadth.up * 2 %}
+    <span class="down"> · 弱势市场</span>
+    {% else %}
+    <span class="flat"> · 均衡</span>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{# ===== 3. 涨跌停统计 ===== #}
+{% set limits = data.get('limits', {}) %}
+{% set zt_stocks = limits.get('zt_stocks', []) %}
+{% if limits.get('zt_count') or limits.get('dt_count') %}
+<div class="section">
+  <div class="section-title"><span class="icon">🔥</span> 涨跌停统计</div>
+  <div class="metric-grid cols-2">
+    <div class="metric-item">
+      <div class="label">涨停</div>
+      <div class="value up">{{ limits.zt_count }}家</div>
+    </div>
+    <div class="metric-item">
+      <div class="label">跌停</div>
+      <div class="value down">{{ limits.dt_count }}家</div>
+    </div>
+  </div>
+  {% if zt_stocks %}
+  <table class="data-table" style="margin-top:4px;">
+    <tr style="background:rgba(255,255,255,0.02);">
+      <td style="font-size:11px;color:var(--text-muted);">股票</td>
+      <td style="font-size:11px;color:var(--text-muted);">涨幅</td>
+      <td style="font-size:11px;color:var(--text-muted);">连板</td>
+      <td style="font-size:11px;color:var(--text-muted);">行业</td>
+    </tr>
+    {% for s in zt_stocks[:10] %}
+    <tr>
+      <td><span class="accent">{{ s.name }}</span><span style="color:var(--text-muted);font-size:11px;">({{ s.code }})</span></td>
+      <td class="up">{{ '%+.1f'|format(s.change_pct) }}%</td>
+      <td>{% if s.lianban > 1 %}<span class="up" style="font-weight:700;">{{ s.lianban }}板</span>{% else %}首板{% endif %}</td>
+      <td style="font-size:12px;color:var(--text-secondary);">{{ s.reason or '--' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% endif %}
+
+{# ===== 4. 概念资金流 ===== #}
+{% set concepts = data.get('concepts', []) %}
+{% if concepts %}
+<div class="section">
+  <div class="section-title"><span class="icon">💰</span> 概念资金流 Top10</div>
+  <table class="data-table">
+    <tr style="background:rgba(255,255,255,0.02);">
+      <td style="font-size:11px;color:var(--text-muted);">概念</td>
+      <td style="font-size:11px;color:var(--text-muted);">涨跌</td>
+      <td style="font-size:11px;color:var(--text-muted);">净流入</td>
+    </tr>
+    {% for c in concepts %}
+    <tr>
+      <td><span class="accent">{{ c.name }}</span></td>
+      <td class="{{ pct_color(c.change_pct) }}">{{ fmt_pct(c.change_pct) }}</td>
+      <td class="{{ pct_color(c.net_inflow) }}">{{ fmt_yi(c.net_inflow) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{# ===== 5. 持仓明细 ===== #}
+{% set portfolio = data.get('portfolio', []) %}
+{% if portfolio %}
+<div class="section">
+  <div class="section-title"><span class="icon">💼</span> 持仓明细</div>
+  <table class="data-table">
+    <tr style="background:rgba(255,255,255,0.02);">
+      <td style="font-size:11px;color:var(--text-muted);">股票</td>
+      <td style="font-size:11px;color:var(--text-muted);">现价</td>
+      <td style="font-size:11px;color:var(--text-muted);">涨跌</td>
+      <td style="font-size:11px;color:var(--text-muted);">持仓</td>
+    </tr>
+    {% for p in portfolio %}
+    <tr>
+      <td>
+        <span class="accent">{{ p.name }}</span>
+        {% if p.note %}<span style="font-size:11px;color:var(--text-muted);margin-left:4px;">{{ p.note }}</span>{% endif %}
+      </td>
+      <td>¥{{ '%.2f'|format(p.price) }}</td>
+      <td class="{{ pct_color(p.change_pct) }}">{{ fmt_pct(p.change_pct) }}</td>
+      <td style="font-size:12px;">{{ p.shares }}股</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{# ===== 6. 自选股 ===== #}
+{% set watchlist = data.get('watchlist', []) %}
+{% if watchlist %}
+<div class="section">
+  <div class="collapsible">
+    <div class="collapsible-toggle">
+      <span class="toggle-label">👀 自选股 ({{ watchlist|length }}只)</span>
+      <span class="toggle-arrow">▼</span>
+    </div>
+    <div class="collapsible-content">
+      <table class="data-table">
+        {% for w in watchlist %}
+        <tr>
+          <td><span class="accent">{{ w.name }}</span><span style="color:var(--text-muted);font-size:11px;margin-left:4px;">{{ w.code }}</span></td>
+          <td>¥{{ '%.2f'|format(w.price) }}</td>
+          <td class="{{ pct_color(w.change_pct) }}">{{ fmt_pct(w.change_pct) }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{# ===== 7. 宏观快照 ===== #}
+{% set macro = data.get('macro', {}) %}
+{% if macro %}
+<div class="section">
+  <div class="collapsible">
+    <div class="collapsible-toggle">
+      <span class="toggle-label">🌍 宏观快照</span>
+      <span class="toggle-arrow">▼</span>
+    </div>
+    <div class="collapsible-content">
+      <div class="metric-grid cols-4" style="margin-top:8px;">
+        {% set us10y = macro.get('us_10y_yield', {}) %}
+        {% if us10y.get('value') is not none %}
+        <div class="metric-item">
+          <div class="label">美债10Y</div>
+          <div class="value">{{ '%.2f'|format(us10y.value) }}%</div>
+        </div>
+        {% endif %}
+        {% for c in macro.get('commodities', []) %}
+        <div class="metric-item">
+          <div class="label">{{ c.name }}</div>
+          <div class="value {{ pct_color(c.change_pct) }}">{{ '%.1f'|format(c.price) if c.price else '--' }}</div>
+          <div class="item-meta {{ pct_color(c.change_pct) }}">{{ fmt_pct(c.change_pct) }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{# ===== FOOTER ===== #}
+<div class="footer">
+  Stock Analysis Pro · 每日复盘 · {{ data.get('date', '') }}<br>
+  数据仅供参考，不构成投资建议
+</div>
+{% endblock %}

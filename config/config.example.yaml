@@ -1,0 +1,41 @@
+# Stock Analysis Pro 配置文件模板
+# 复制为 config.yaml 并填入实际值
+# cp config/config.example.yaml config/config.yaml
+
+# 东方财富API配置
+# Cookie从浏览器获取: https://quote.eastmoney.com/bk/ → F12 → Network → 任意请求的Cookie
+# 注意: Cookie会过期，需要定期更新
+eastmoney:
+  cookie: "your_cookie_here"
+  # ut参数通常固定，不需要改
+  ut: "8dec03ba335b81bf4ebdf7b29ec27d15"
+
+# HTTPS代理 (akshare等接口需要, 国内服务器建议配置)
+# 也可通过环境变量 HTTPS_PROXY 设置，优先级更高
+# proxy:
+#   https: "http://127.0.0.1:10809"
+
+# 持仓管理 (从stock_review/config.json迁移)
+portfolio:
+  - code: "603893"
+    name: "瑞芯微"
+    cost: 0
+    shares: 0
+    note: "SoC芯片设计"
+  # 添加更多持仓...
+  # - code: "600887"
+  #   name: "伊利股份"
+  #   cost: 0
+  #   shares: 0
+  #   note: "乳制品"
+
+# 复盘跟踪的指数
+indices:
+  - code: "sh000001"
+    name: "上证指数"
+  - code: "sz399001"
+    name: "深证成指"
+  - code: "sz399006"
+    name: "创业板指"
+  - code: "sh000688"
+    name: "科创50"
