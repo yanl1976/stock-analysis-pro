@@ -59,6 +59,22 @@ def change_on(kl, date):
 
 
 # ───────────────── 回测主流程 ─────────────────
+def _md(d):
+    """'2026-06-08' -> '6/8' (M/D, 用于报告标签)"""
+    return f"{int(d[5:7])}/{int(d[8:10])}"
+
+
+def _trading_days(buy_date, sell_date):
+    """区间交易日数 (用上证指数K线统计)"""
+    try:
+        kl = _kline_cached("000001")
+        ds = [b["date"][:10] for b in kl]
+        n = len([d for d in ds if buy_date <= d <= sell_date])
+        return n
+    except Exception:
+        return None
+
+
 def restore_hotspots(buy_date, pool_size=120, heat_per=8, verbose=True):
     """还原 buy_date 当天热点板块 (成分股历史涨幅反推)
 
@@ -96,7 +112,7 @@ def restore_hotspots(buy_date, pool_size=120, heat_per=8, verbose=True):
                 "bk_code": c["bk_code"],
             }
         if verbose:
-            print(f"    {c['name']}: 7/6 均涨 {board_heat.get(c['name'],{}).get('heat','-')}%")
+            print(f"    {c['name']}: {_md(buy_date)} 均涨 {board_heat.get(c['name'],{}).get('heat','-')}%")
 
     ranked = sorted(board_heat.items(), key=lambda x: -x[1]["heat"])
     return ranked
@@ -202,13 +218,15 @@ def build_report(buy_date, sell_date, hotspots, top_n, picks, benchmark=None):
     lines.append(f"{'='*60}")
     lines.append(f"\n【一、回测设定】")
     lines.append(f"  买点视角: {buy_date} 盘后 (K线截断到当日, 用当日收盘选股)")
-    lines.append(f"  卖点视角: {sell_date} 收盘 (持有约 4 个交易日)")
+    tdays = _trading_days(buy_date, sell_date)
+    tdays_str = f"持有约 {tdays} 个交易日" if tdays else "持有区间"
+    lines.append(f"  卖点视角: {sell_date} 收盘 ({tdays_str})")
     lines.append(f"  热点还原: 成分股 {buy_date} 历史涨幅反推板块热度, Top {top_n}")
     lines.append(f"  选股逻辑: classify_stage 形态识别 + 形态成功率/评级/买点 (与 weekly_hotspot 一致)")
 
     lines.append(f"\n【二、{buy_date} 热点板块还原 (Top {top_n})】")
     for i, (name, info) in enumerate(hotspots[:top_n], 1):
-        lines.append(f"  {i}. {name}  7/6 均涨 {info['heat']:+.2f}%  上涨占比 {info['up_ratio']}% ({info['n']}只)")
+        lines.append(f"  {i}. {name}  {_md(buy_date)} 均涨 {info['heat']:+.2f}%  上涨占比 {info['up_ratio']}% ({info['n']}只)")
 
     lines.append(f"\n【三、{buy_date} 选股结果 ({len(picks)} 只)】")
     for i, p in enumerate(picks[:15], 1):
@@ -248,7 +266,7 @@ def build_report(buy_date, sell_date, hotspots, top_n, picks, benchmark=None):
             ta = sum(p["return_pct"] for p in tradable) / len(tradable)
             tw = sum(1 for p in tradable if p["return_pct"] > 0)
             tex = (ta - benchmark) if benchmark is not None else None
-            lines.append(f"  · 剔除7/6涨停股(应等回踩不追)后 {len(tradable)}只 | 平均 {ta:+.2f}% | 胜率 {round(tw/len(tradable)*100)}%" + (f" | 超额 {tex:+.2f}%" if tex is not None else ""))
+            lines.append(f"  · 剔除{_md(buy_date)}涨停股(应等回踩不追)后 {len(tradable)}只 | 平均 {ta:+.2f}% | 胜率 {round(tw/len(tradable)*100)}%" + (f" | 超额 {tex:+.2f}%" if tex is not None else ""))
         for r in ("重点", "关注", "观察", "暂避"):
             grp = [p for p in valid if p["rating"] == r]
             if grp:
