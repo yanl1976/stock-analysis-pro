@@ -1,13 +1,13 @@
 ---
-name: chinese-stock-analysis
+name: stock-analysis-pro
 version: 3.0.0
-description: A股全维度分析工具 — 个股分析、概念板块扫描、宏观市场概览、每日复盘、ETF期权扫描
+description: A股全维度分析工具 — 个股分析、概念板块扫描、突破扫描、宏观市场概览、每日复盘、ETF期权扫描
 category: research
 ---
 
-# chinese-stock-analysis (stock-analysis-pro)
+# stock-analysis-pro
 
-A股全维度分析 + ETF 期权分析工具，覆盖个股深度分析、概念板块扫描、宏观市场概览、每日复盘、ETF 期权扫描五大核心功能。
+A股全维度分析 + ETF 期权分析工具，覆盖个股深度分析、概念板块扫描、突破扫描、宏观市场概览、每日复盘、ETF 期权扫描六大核心功能。
 
 ---
 
@@ -94,6 +94,14 @@ python core/cli.py analyze 600519 --brief  # 简要模式
 # ── 概念板块扫描 ──
 python core/cli.py concept                 # 资金流入 Top10
 python core/cli.py concept --html          # HTML 报告
+
+# ── 突破扫描 (概念技术突破增强版) ──
+python core/cli.py breakthrough                      # 热点版块 Top5 × 每版块15只，全扫
+python core/cli.py breakthrough --concepts 3 --per 40  # 3个版块 × 每版块40只(更深挖平台股)
+python core/cli.py breakthrough --sector 风电          # 只扫指定版块
+python core/cli.py breakthrough --stage-filter about_to_launch  # 仅保留"即将启动"态
+python core/cli.py breakthrough --json                 # JSON 输出
+python core/cli.py breakthrough --html                 # HTML 报告
 
 # ── 宏观市场概览 ──
 python core/cli.py market                  # 文本输出
@@ -212,6 +220,27 @@ collectors/          analysis/           plans/
 3. 成分股涨幅分布 → 趋势定性(启动/主升浪/走弱)
 4. 概念评分(赚钱效应/介入时机/资金强度/板块宽度)
 5. 新闻归因 → 驱动逻辑
+
+### 突破扫描 (breakthrough) — 概念技术突破增强版
+
+在热点版块（概念扫描结果）内对成分股做**形态识别 + 量价确认 + 趋势状态分类**，是 concept 报告中"技术突破/刚启动"模块的独立增强版。
+
+**编排**：`concept_rank_sina` 热点版块 → `fetch_concept_stocks_sina` 成分股 → 逐股 `kline`(250日)+`realtime` → `classify_stage()` 七态分类 → 按评分降序。
+
+**七态分类**（`analysis/breakout.py:classify_stage`）：
+| 状态 | 含义 | 触发信号 |
+|------|------|----------|
+| `platform` 平台整理 | 波动收敛、箱体未破 | 布林带宽<15% + 持续≥20日 |
+| `about_to_launch` 即将启动 | 平台末端、变盘前夜 | 平台 + BB挤压极致 + VCP收缩 + MACD/KDJ金叉 |
+| `breakout` 突破 | 放量越过平台上沿 | 创N日新高 + 量能>20日均量×1.5 |
+| `running` 已运行 | 已主升、慎追高 | 远离MA、RSI超买 |
+| `falling` 下跌 / `trending` 趋势中 / `unknown` 未知 | 其他 | — |
+
+**评分维度**(0-100)：形态分(平台干净度/收敛极致度) + 突破分(距上沿/量能) + 趋势分(MA多头/MACD/KDJ) + 板块分(版块资金排名) + 资金分(量比/换手)。
+
+**与 concept 的关系**：concept 报告内 `breakout_stocks`/`just_started` 原本是轻量启发式（连涨天数+距月低涨幅），现已**去重**——直接调用 `classify_stage()`，全库仅一套形态识别逻辑。breakthrough 命令则是对外独立的完整扫描入口。
+
+**参数**：`--concepts N`(版块数,默认5) / `--per N`(每版块股数,默认15) / `--sector 名称`(单版块) / `--stage-filter`(状态过滤) / `--json` / `--html`。
 
 ### 宏观市场概览 (market)
 

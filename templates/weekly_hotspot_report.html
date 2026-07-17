@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}本周热点选股报告 — {{ data.date if data.date else '' }}{% endblock %}
+{% block body %}
+
+{% macro pct_color(v) %}{% if v is not none and v > 0 %}up{% elif v is not none and v < 0 %}down{% else %}flat{% endif %}{% endmacro %}
+{% macro fmt_pct(v) %}{% if v is not none %}{{ '%+.2f'|format(v) }}%{% else %}--{% endif %}{% endmacro %}
+
+{% set candidates = (data.breakthrough.get('candidates', []) if data.breakthrough and 'candidates' in data.breakthrough else []) %}
+{% set stage_cls = {'about_to_launch':'var(--green)','breakout':'var(--accent)','running':'var(--yellow)','platform':'var(--blue)','trending':'var(--text-muted)','falling':'var(--red)','unknown':'var(--text-muted)'} %}
+{% set stage_label = {'platform':'🟦 平台整理','about_to_launch':'🟢 即将启动','breakout':'🚀 突破启动','running':'🔥 已主升(慎追)','falling':'📉 下跌','trending':'📈 趋势中','unknown':'❓ 未知'} %}
+
+<div class="header">
+  <h1>📊 本周热点选股报告</h1>
+  <div class="subtitle">{{ data.date }} · 热点 {{ data.hotspots|length }} 板块 · 自选 {{ data.watchlist|length }} 只 · 突破候选 {{ candidates|length }} 只</div>
+</div>
+
+{# 一、热点版块 #}
+<div class="section">
+  <div class="section-title"><span class="icon">🔥</span> 本周热点版块</div>
+  {% for c in data.hotspots %}
+  <div class="card" style="display:flex;align-items:center;">
+    <span style="flex:1;font-weight:700;">{{ c.name }}</span>
+    <span class="{{ pct_color(c.change_pct) }}" style="font-weight:600;margin-right:10px;">{{ fmt_pct(c.change_pct) }}</span>
+    <span style="font-size:12px;color:var(--text-muted);margin-right:10px;">成交 {{ '%.1f'|format(c.amount/1e8) if c.amount else '0' }}亿</span>
+    {% if c.leader %}<span style="font-size:12px;color:var(--text-muted);">龙头 {{ c.leader }} {{ fmt_pct(c.leader_pct) }}</span>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+{# 二、自选股更新 #}
+<div class="section">
+  <div class="section-title"><span class="icon">⭐</span> 自选股更新 (每板块取涨幅前 2)</div>
+  {% for g in data.watchlist_grouped %}
+  <div class="card">
+    <div style="font-weight:700;margin-bottom:4px;">{{ g.concept }}</div>
+    <div style="font-size:13px;color:var(--text-muted);">
+      {% for p in g.picks %}<span style="margin-right:14px;">{{ p.name }}({{ p.code }}) <b class="{{ pct_color(p.pct) }}">{{ fmt_pct(p.pct) }}</b></span>{% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{# 三、新选股逻辑筛选 (突破候选) #}
+<div class="section">
+  <div class="section-title"><span class="icon">🎯</span> 新选股逻辑筛选 (classify_stage 形态识别)</div>
+  {% if data.breakthrough and data.breakthrough.get('error') %}
+    <div style="padding:12px;color:var(--red);">突破扫描失败: {{ data.breakthrough.error }}</div>
+  {% elif not candidates %}
+    <div style="padding:12px;color:var(--text-muted);">未筛选出候选</div>
+  {% endif %}
+  {% for c in candidates %}
+  {% set d = c.get('details', {}) or {} %}
+  {% set sc = stage_cls.get(c.stage, 'var(--text-muted)') %}
+  <div class="card" style="margin-bottom:10px;">
+    <div style="display:flex;align-items:center;">
+      <span style="width:22px;font-size:12px;color:var(--text-muted);">{{ loop.index }}</span>
+      <span style="flex:1;font-size:15px;font-weight:700;">{{ c.name }}<span style="font-size:12px;color:var(--text-muted);font-weight:400;"> ({{ c.symbol }})</span></span>
+      <span style="font-size:14px;font-weight:600;margin-right:8px;" class="{{ pct_color(c.change_pct) }}">{{ fmt_pct(c.change_pct) }}</span>
+      <span style="font-size:11px;padding:2px 8px;border-radius:10px;background:{{ sc }}22;color:{{ sc }};font-weight:600;">{{ stage_label.get(c.stage, c.stage) }}</span>
+      <span style="font-size:16px;font-weight:800;color:{% if c.score>=70 %}var(--green){% elif c.score>=50 %}var(--accent){% elif c.score>=30 %}var(--yellow){% else %}var(--red){% endif %};min-width:52px;text-align:right;margin-left:8px;">{{ c.score }}分</span>
+      <span style="font-size:11px;color:var(--text-muted);margin-left:6px;">成功率{{ '%.0f'|format(c.win_rate*100) if c.win_rate is defined else '—' }}%</span>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);padding:4px 0 2px 22px;">
+      所属热点: <b style="color:var(--text);">{{ c.concept }}</b>
+      {% if c.signals %} · 信号: {{ c.signals|join(' / ') }}{% endif %}
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;padding:2px 0 2px 22px;font-size:11px;">
+      <span class="metric">平台带宽 {{ d.get('band_width') or '—' }}</span>
+      <span class="metric">布林收缩分位 {{ d.get('bb_squeeze_pct') or '—' }}</span>
+      <span class="metric">VCP×{{ d.get('vcp') or '—' }}</span>
+      <span class="metric">量比 {{ d.get('vol_ratio') or '—' }}</span>
+      <span class="metric">距压力 {{ d.get('pct_to_resistance') or '—' }}%</span>
+      <span class="metric">MACD金叉 {{ '✓' if d.get('macd_gc') else '—' }}</span>
+      <span class="metric">KDJ金叉 {{ '✓' if d.get('kdj_gc') else '—' }}</span>
+      <span class="metric">多头排列 {{ '✓' if d.get('ma_bull') else '—' }}</span>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{# 四、买入建议与计划 #}
+<div class="section">
+  <div class="section-title"><span class="icon">💡</span> 买入建议与计划 (形态成功率 + 综合评级)</div>
+  <div style="font-size:12px;color:var(--text-muted);padding:0 12px 8px;">评级: 重点 &gt; 关注 &gt; 观察 &gt; 暂避 · 仓位为单标的上限建议</div>
+  {% set rate_cls = {'重点':'var(--green)','关注':'var(--accent)','观察':'var(--yellow)','暂避':'var(--red)'} %}
+  {% for c in candidates[:15] %}
+  {% set rc = rate_cls.get(c.rating, 'var(--text-muted)') %}
+  <div class="card" style="margin-bottom:8px;">
+    <div style="display:flex;align-items:center;">
+      <span style="flex:1;font-size:15px;font-weight:700;">{{ c.name }}<span style="font-size:12px;color:var(--text-muted);font-weight:400;"> ({{ c.symbol }})</span></span>
+      <span style="font-size:11px;padding:2px 8px;border-radius:10px;background:{{ rc }}22;color:{{ rc }};font-weight:700;margin-right:6px;">{{ c.rating or '—' }}</span>
+      <span style="font-size:12px;color:var(--text-muted);margin-right:8px;">成功率 {{ '%.0f'|format(c.win_rate*100) if c.win_rate is defined else '—' }}%</span>
+      <span style="font-size:14px;font-weight:700;">{{ c.position or '—' }}%仓</span>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);padding:3px 0 1px 0;">
+      热点: {{ c.concepts|join('、') if c.concepts else c.concept }} · 模型分 {{ c.score }} · 止损 ¥{{ c.stop_loss }} ({{ c.stop_pct }}%)
+    </div>
+    <div style="font-size:12px;padding:1px 0 2px 0;">📍 买点: {{ c.buy_point }}</div>
+  </div>
+  {% endfor %}
+</div>
+
+{% endblock %}

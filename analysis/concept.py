@@ -2,6 +2,7 @@
 """分析维度层 — 概念板块趋势定性 + 深度分析 + 机会挖掘"""
 
 from collectors.concept import concept_leader_kline, concept_stocks, batch_klines
+from analysis.breakout import classify_stage
 
 
 def analyze_board_trend(deep_result: dict) -> dict:
@@ -126,44 +127,20 @@ def _is_limit_up(pct: float) -> bool:
     return pct >= 9.8
 
 
-def _get_limit_up_pct(symbol: str) -> float:
-    """根据股票代码判断涨停幅度 (%)"""
-    # 去掉 sh/sz 前缀
-    code = symbol[2:] if symbol[:2] in ('sh', 'sz', 'bj') else symbol
-    if code.startswith(('300', '688')):
-        return 20.0  # 创业板/科创板
-    elif code.startswith('8'):
-        return 30.0  # 北交所
-    else:
-        return 10.0  # 主板
+def _rise_from_low(klines: list, window: int = 20) -> float:
+    """当前价相对近 window 日低点的涨幅 (%) — 仅作展示指标, 不再用于"刚启动"判定
 
-
-def _is_just_started(klines: list, symbol: str) -> tuple:
-    """
-    判断是否"刚启动": 首日上涨 + 相对近一月低点涨幅 < 涨停*1.2
-
-    Returns: (is_just_started: bool, rise_from_low: float)
+    "刚启动"判定已统一交由 analysis.breakout.classify_stage() 处理。
     """
     if not klines or len(klines) < 2:
-        return False, 0.0
-
-    # 条件1: 首日上涨
-    if klines[-1]['close'] <= klines[-2]['close']:
-        return False, 0.0
-
-    # 条件2: 对比近一月(20日)低点
-    lookback = min(len(klines), 20)
+        return 0.0
+    lookback = min(len(klines), window)
     recent = klines[-lookback:]
     low = min(k['low'] for k in recent)
     current = klines[-1]['close']
-
     if low <= 0:
-        return False, 0.0
-
-    rise_from_low = (current - low) / low * 100
-    threshold = _get_limit_up_pct(symbol) * 1.2
-
-    return rise_from_low <= threshold, round(rise_from_low, 2)
+        return 0.0
+    return round((current - low) / low * 100, 2)
 
 
 def analyze_concept_deep(stocks: list, total_amount: float, verbose=False) -> dict:
@@ -210,11 +187,11 @@ def analyze_concept_deep(stocks: list, total_amount: float, verbose=False) -> di
         "total": len(stocks),
     }
 
-    # ── 拉K线数据 (用于连续天数 + 量比) ──
+    # ── 拉K线数据 (连续天数 + 量比 + 统一形态识别 classify_stage) ──
     symbols = [s['symbol'] for s in stocks if s.get('symbol')]
     if verbose:
-        print(f"    拉取 {len(symbols)} 只股票K线...")
-    klines_map = batch_klines(symbols, datalen=30, delay=0.12, verbose=verbose)
+        print(f"    拉取 {len(symbols)} 只股票K线(250日)...")
+    klines_map = batch_klines(symbols, datalen=250, delay=0.12, verbose=verbose)
 
     # ── 3. 持续性分布 (连续上涨天数) ──
     consecutive_3plus = consecutive_2 = just_started = falling = flat_or_other = 0
@@ -227,7 +204,23 @@ def analyze_concept_deep(stocks: list, total_amount: float, verbose=False) -> di
         days = _count_consecutive_up(klines)
         vr = _volume_ratio(klines)
 
-        is_js, rise_low = _is_just_started(klines, sym)
+        # 单股形态识别 — 统一数据源 classify_stage (analysis/breakout.py)
+        stage = "unknown"
+        score = 0
+        signals = []
+        if len(klines) >= 40:
+            closes = [k['close'] for k in klines]
+            highs = [k['high'] for k in klines]
+            lows = [k['low'] for k in klines]
+            vols = [k['volume'] for k in klines]
+            # 用涨跌幅反推当日近似价, 提升突破阈值判定灵敏度
+            price = closes[-1] * (1 + pct / 100) if closes else None
+            cls = classify_stage(closes, highs, lows, vols, price=price)
+            stage = cls['stage']
+            score = cls['score']
+            signals = cls['signals']
+
+        rise_low = _rise_from_low(klines)
 
         stock_momentum.append({
             "symbol": sym,
@@ -238,13 +231,16 @@ def analyze_concept_deep(stocks: list, total_amount: float, verbose=False) -> di
             "turnover": float(s.get('turnoverratio', 0)),
             "amount_yi": round(float(s.get('amount', 0)) / 1e8, 2),
             "rise_from_low": rise_low,
+            "stage": stage,
+            "score": score,
+            "signals": signals,
         })
 
         if days >= 3:
             consecutive_3plus += 1
         elif days == 2:
             consecutive_2 += 1
-        elif is_js:
+        elif stage in ('about_to_launch', 'breakout'):
             just_started += 1
         elif pct < 0:
             falling += 1
@@ -265,13 +261,11 @@ def analyze_concept_deep(stocks: list, total_amount: float, verbose=False) -> di
         key=lambda x: (-x['consecutive_days'], -x['pct'])
     )[:5]
 
-    # ── 5. 涨幅>5%且刚启动 的股票（排除已连涨2天+的） ──
+    # ── 5. 形态突破/即将启动股 (统一用 classify_stage 识别, 按评分降序) ──
     breakout_stocks = sorted(
         [sm for sm in stock_momentum
-         if sm['pct'] > 5
-         and sm['consecutive_days'] <= 1
-         and sm.get('rise_from_low', 999) <= _get_limit_up_pct(sm['symbol']) * 1.2],
-        key=lambda x: -x['pct']
+         if sm['stage'] in ('about_to_launch', 'breakout')],
+        key=lambda x: (-x['score'], -x['pct'])
     )[:10]
 
     # ── 6. 涨停统计 ──

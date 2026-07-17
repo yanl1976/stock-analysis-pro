@@ -100,6 +100,10 @@ def parse_command(text):
     if low in ("复盘", "review", "每日复盘", "收盘复盘"):
         return ["review"], "每日复盘"
 
+    # 每周热点选股流水线 (须在"概念/热点"之前, 避免被裸"热点"抢先)
+    if any(k in low for k in ("热点选股", "每周热点", "周报选股", "周热点")):
+        return ["__weekly_hotspot__"], "每周热点选股"
+
     # 概念板块 (含 "分析热点"/"看题材" 等组合词)
     if any(k in low for k in ("概念", "concept", "热点", "题材")):
         return ["concept", "--stage", "list", "--top", "10"], "概念板块扫描"
@@ -159,6 +163,7 @@ _HELP = """📈 **Stock Analysis Pro 使用指南**
 • `自选分析` / `分析全部` —— 自选股批量分析(汇总报告)
 • `清空自选` —— 清空自选股列表
 • `概念` / `热点` —— 概念板块资金榜
+• `热点选股` / `每周热点` —— 每周热点选股流水线(建自选+突破扫描+推送)
 • `复盘` / `review` —— 每日复盘
 • `期权` / `options` —— ETF 期权机会扫描
 • `大盘` / `market` —— 大盘概览
@@ -193,6 +198,37 @@ async def run_cli(args):
             proc.kill()
             await proc.wait()
             return "⏱️ 分析超时（已限制 %d 秒）。请稍后再试，或先发「概念 / 大盘」等轻量指令。" % timeout, ""
+    except Exception as e:
+        return "", f"执行失败: {e}"
+    text = out.decode("utf-8", errors="replace").strip()
+    errtext = err.decode("utf-8", errors="replace").strip()
+    return text, errtext
+
+
+async def run_script(script_rel, args, timeout=900):
+    """运行项目内任意 python 脚本 (如 plans/weekly_hotspot.py), 返回 (stdout, err)。
+
+    与 run_cli 区别: 入口不是 core/cli.py, 而是 script_rel 指定的脚本。
+    超时给足 (默认 900s), 热点选股含突破扫描可能耗时数分钟。
+    """
+    cmd = [sys.executable, script_rel] + list(args)
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=BASE_DIR,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return "⏱️ 执行超时（已限制 %d 秒）。请稍后再试。" % timeout, ""
     except Exception as e:
         return "", f"执行失败: {e}"
     text = out.decode("utf-8", errors="replace").strip()
@@ -323,11 +359,17 @@ async def handle_message(client, frame):
     except Exception:
         pass
 
-    text, err = await run_cli(run_args)
-    if err and not text:
-        text = f"⚠️ 分析失败：\n{err[:1500]}"
+    # 每周热点选股流水线 (独立脚本, 不走 cli.py; --no-push + --html 由 bot 统一回传/附文件)
+    is_weekly = bool(args and args[0] == "__weekly_hotspot__")
+    if is_weekly:
+        text, err = await run_script("plans/weekly_hotspot.py", ["--no-push", "--html"] + args[1:])
+    else:
+        text, err = await run_cli(run_args)
 
-    # 解析 HTML 报告路径 (cli.py --html 末尾输出 HTML_REPORT:<path>)
+    if err and not text:
+        text = (f"⚠️ 热点选股失败：" if is_weekly else "⚠️ 分析失败：") + f"\n{err[:1500]}"
+
+    # 统一解析 HTML 报告路径 (各入口均输出 HTML_REPORT:<path> 约定)
     html_path = None
     summary_text = text or ""
     if "HTML_REPORT:" in summary_text:
@@ -350,7 +392,7 @@ async def handle_message(client, frame):
                 "markdown": {"content": f"（{i+1}/{len(chunks)}）\n{ch}"},
             })
 
-    # 附上 HTML 报告文件 (复用当前连接)
+    # 附上 HTML 报告文件 (复用当前连接, 各入口统一)
     if html_path and os.path.exists(html_path):
         ok = await send_file_on_client(client, html_path, target)
         if not ok:
@@ -472,6 +514,37 @@ async def send_file_on_client(client, filepath: str, chatid: str) -> bool:
         return True
     except Exception as e:
         print(f"[AIBOT] 发送失败: {e}", file=sys.stderr)
+        return False
+
+
+def push_markdown_via_bot(text, chatid=None):
+    """经 aibot 通道把 markdown 文本推送到指定会话 (默认最近交互会话, 退 YanLang)。
+
+    用于流水线主动推送 (如每周热点选股报告)。无 aibot 配置/推送失败时返回 False,
+    由调用方决定降级 (报告已落盘)。
+    """
+    if not is_enabled() or not all(get_bot_creds()):
+        print("[AIBOT] 未启用/未配置智能机器人, 跳过推送", file=sys.stderr)
+        return False
+    chat = chatid or load_chat_id() or "YanLang"
+    client = build_client()
+
+    async def go():
+        await client.connect()
+        await asyncio.sleep(3)  # 等待自动认证完成
+        for ch in _split_by_bytes(text or "(无内容)", 3800):
+            await client.send_message(chat, {
+                "msgtype": "markdown",
+                "markdown": {"content": ch},
+            })
+        client.disconnect()
+        print(f"[AIBOT] 已推送 {len(_split_by_bytes(text or '(无内容)', 3800))} 条到 {chat}", flush=True)
+
+    try:
+        asyncio.run(go())
+        return True
+    except Exception as e:
+        print(f"[AIBOT] 推送失败: {e}", file=sys.stderr)
         return False
 
 

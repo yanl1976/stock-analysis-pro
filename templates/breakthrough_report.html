@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}突破扫描 — {{ now.strftime('%Y-%m-%d') if now else '' }}{% endblock %}
+{% block body %}
+
+{% macro pct_color(v) %}{% if v is not none and v > 0 %}up{% elif v is not none and v < 0 %}down{% else %}flat{% endif %}{% endmacro %}
+{% macro fmt_pct(v) %}{% if v is not none %}{{ '%+.2f'|format(v) }}%{% else %}--{% endif %}{% endmacro %}
+
+{% set candidates = data.get('candidates', []) %}
+{% set concepts = data.get('concepts', []) %}
+
+<div class="header">
+  <h1>🎯 热点版块突破扫描</h1>
+  <div class="subtitle">{{ now.strftime('%Y-%m-%d %H:%M') if now else '' }} · 候选 {{ candidates|length }} 只 · 按突破评分排序</div>
+</div>
+
+{% if concepts %}
+<div class="section">
+  <div class="section-title"><span class="icon">🔥</span> 扫描热点版块</div>
+  <div style="padding:4px 12px 8px;font-size:13px;color:var(--text-muted);">
+    {% for c in concepts %}<span style="margin-right:14px;">{{ c.name }} <b class="{{ pct_color(c.change_pct) }}">{{ fmt_pct(c.change_pct) }}</b></span>{% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<div class="section">
+  <div class="section-title"><span class="icon">📊</span> 突破候选排行</div>
+  {% if not candidates %}
+    <div style="padding:12px;color:var(--text-muted);">未筛选出候选 (可放宽 --stage-filter 或增大 --per)</div>
+  {% endif %}
+  {% for c in candidates %}
+  {% set d = c.get('details', {}) %}
+  {% set stage_cls = {'about_to_launch':'var(--green)','breakout':'var(--accent)','running':'var(--yellow)','platform':'var(--blue)','trending':'var(--text-muted)','falling':'var(--red)','unknown':'var(--text-muted)'}.get(c.stage, 'var(--text-muted)') %}
+  {% set stage_label = {'platform':'🟦 平台整理','about_to_launch':'🟢 即将启动','breakout':'🚀 突破启动','running':'🔥 已主升(慎追)','falling':'📉 下跌','trending':'📈 趋势中','unknown':'❓ 未知'}.get(c.stage, c.stage) %}
+  <div class="card" style="margin-bottom:10px;">
+    <div style="display:flex;align-items:center;">
+      <span style="width:22px;font-size:12px;color:var(--text-muted);">{{ loop.index }}</span>
+      <span style="flex:1;font-size:15px;font-weight:700;">{{ c.name }}<span style="font-size:12px;color:var(--text-muted);font-weight:400;"> ({{ c.symbol }})</span></span>
+      <span style="font-size:14px;font-weight:600;margin-right:8px;" class="{{ pct_color(c.change_pct) }}">{{ fmt_pct(c.change_pct) }}</span>
+      <span style="font-size:11px;padding:2px 8px;border-radius:10px;background:{{ stage_cls }}22;color:{{ stage_cls }};font-weight:600;">{{ stage_label }}</span>
+      <span style="font-size:16px;font-weight:800;color:{% if c.score>=70 %}var(--green){% elif c.score>=50 %}var(--accent){% elif c.score>=30 %}var(--yellow){% else %}var(--red){% endif %};min-width:52px;text-align:right;margin-left:8px;">{{ c.score }}分</span>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);padding:4px 0 2px 22px;">
+      所属热点: <b style="color:var(--text);">{{ c.concept }}</b> {{ fmt_pct(c.concept_pct) }}
+      {% if c.signals %} · 信号: {{ c.signals|join(' / ') }}{% endif %}
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;padding:2px 0 2px 22px;font-size:11px;">
+      <span class="metric">平台带宽 {{ d.get('band_width') }}</span>
+      <span class="metric">布林收缩分位 {{ d.get('bb_squeeze_pct') }}</span>
+      <span class="metric">VCP×{{ d.get('vcp') }}</span>
+      <span class="metric">量比 {{ d.get('vol_ratio') }}</span>
+      <span class="metric">距压力 {{ d.get('pct_to_resistance') }}%</span>
+      <span class="metric">MACD金叉 {{ '✓' if d.get('macd_gc') else '—' }}</span>
+      <span class="metric">KDJ金叉 {{ '✓' if d.get('kdj_gc') else '—' }}</span>
+      <span class="metric">多头排列 {{ '✓' if d.get('ma_bull') else '—' }}</span>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{% endblock %}

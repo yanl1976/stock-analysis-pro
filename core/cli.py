@@ -21,21 +21,6 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 WATCHLIST_PATH = os.path.join(DATA_DIR, "watchlist.json")
 
 
-# 内置默认自选股 (无 watchlist.json 时兜底, 覆盖主要行业龙头)
-DEFAULT_WATCHLIST = [
-    "600519",  # 贵州茅台
-    "300750",  # 宁德时代
-    "002594",  # 比亚迪
-    "601318",  # 中国平安
-    "600036",  # 招商银行
-    "600900",  # 长江电力
-    "300059",  # 东方财富
-    "600030",  # 中信证券
-    "000725",  # 京东方A
-    "601012",  # 隆基绿能
-]
-
-
 def get_watchlist():
     if not os.path.exists(WATCHLIST_PATH):
         return []
@@ -44,9 +29,8 @@ def get_watchlist():
 
 
 def get_watchlist_effective():
-    """返回实际自选股; 若文件不存在/为空, 返回内置默认清单 (兜底用)。"""
-    wl = get_watchlist()
-    return wl if wl else list(DEFAULT_WATCHLIST)
+    """返回实际自选股; 若文件不存在/为空, 返回空列表 (不再内置默认清单)。"""
+    return get_watchlist()
 
 
 def save_watchlist(lst):
@@ -90,7 +74,7 @@ def print_summary(data):
 
 def main():
     parser = argparse.ArgumentParser(description="Stock Analysis Pro — A股多维分析工具")
-    parser.add_argument("command", choices=["analyze", "market", "analyze-all", "add", "rm", "list", "clear", "concept", "review", "options", "portfolio"])
+    parser.add_argument("command", choices=["analyze", "market", "analyze-all", "add", "rm", "list", "clear", "concept", "review", "options", "portfolio", "breakthrough"])
     parser.add_argument("symbol", nargs="*", help="Stock code(s), 支持多个 (空格分隔)")
     parser.add_argument("--date", help="Date YYYYMMDD")
     parser.add_argument("--json", action="store_true", help="JSON output")
@@ -102,6 +86,10 @@ def main():
     parser.add_argument("--top", type=int, default=10, help="Top N results (options/concept)")
     parser.add_argument("--stage", choices=["all", "list", "detail"], default="all",
                         help="concept: all=一步完成(默认); list=快速仅榜单; detail=慢速拉成分股(需先list)")
+    parser.add_argument("--concepts", type=int, default=5, help="突破扫描: 热点版块数量")
+    parser.add_argument("--per", type=int, default=15, help="突破扫描: 每版块成分股数")
+    parser.add_argument("--sector", help="突破扫描: 指定单一版块名称")
+    parser.add_argument("--stage-filter", help="突破扫描: 仅保留某状态(about_to_launch/breakout/...)")
     parser.add_argument("--action", choices=["add", "rm", "list", "update"], help="Portfolio action")
     parser.add_argument("--name", help="Portfolio stock name")
     parser.add_argument("--cost", type=float, help="Portfolio cost")
@@ -143,9 +131,9 @@ def main():
 
         elif args.command == "analyze-all":
             wl = get_watchlist_effective()
-            if wl == DEFAULT_WATCHLIST:
-                print("ℹ️ 未配置自选股 (data/watchlist.json 为空), 使用内置默认清单 10 只龙头股。", file=sys.stderr)
-                print("   可用 `python core/cli.py add 600000` 添加, `list` 查看。", file=sys.stderr)
+            if not wl:
+                print("ℹ️ 自选股为空 (data/watchlist.json), 请先用 `add` 添加或运行热点选股流程。", file=sys.stderr)
+                return
             from plans.stock_analysis import run
             if args.html:
                 stocks = []
@@ -219,7 +207,7 @@ def main():
 
         elif args.command == "clear":
             save_watchlist([])
-            print("Watchlist cleared (0 stocks). `analyze-all` 将回退到内置默认清单。")
+            print("Watchlist cleared (0 stocks).")
 
         elif args.command == "review":
             from plans.daily_report import run as run_review, format_report as format_review
@@ -244,6 +232,24 @@ def main():
                 print(json.dumps(data, ensure_ascii=False, indent=2))
             else:
                 print_options_summary(data)
+
+        elif args.command == "breakthrough":
+            from plans.breakout_scan import run as run_breakthrough, format_report as fmt_breakthrough
+            data = run_breakthrough(
+                top_concepts=args.concepts,
+                top_per_concept=args.per,
+                sector=args.sector,
+                stage_filter=args.stage_filter,
+                verbose=not args.json and not args.html,
+            )
+            if args.html:
+                print(fmt_breakthrough(data))
+                from core.html_renderer import render
+                print(f"HTML_REPORT:{render(data, 'breakthrough_report')}")
+            elif args.json:
+                print(json.dumps(data, ensure_ascii=False, indent=2))
+            else:
+                print(fmt_breakthrough(data))
 
         elif args.command == "portfolio":
             from config import load_config

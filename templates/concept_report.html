@@ -189,11 +189,11 @@
   </div>
   {% endif %}
 
-  {# --- Breakout Stocks (涨>5%且刚启动) --- #}
+  {# --- Breakout Stocks (形态识别: about_to_launch / breakout) --- #}
   {% set breakout = deep.breakout_stocks|default([]) %}
   {% if breakout %}
   <div style="padding:10px 16px;border-top:1px solid var(--card-border);">
-    <div style="font-size:13px;font-weight:600;margin-bottom:8px;">🚀 突破启动股 (涨>5% · 首日启动)</div>
+    <div style="font-size:13px;font-weight:600;margin-bottom:8px;">🚀 形态突破/即将启动股 (classify_stage)</div>
     <table class="data-table" style="font-size:12px;">
       <tr style="color:var(--text-muted);font-size:11px;">
         <td>股票</td>
@@ -201,6 +201,7 @@
         <td style="text-align:right;">换手</td>
         <td style="text-align:right;">量比</td>
         <td style="text-align:right;">成交(亿)</td>
+        <td>状态/信号</td>
       </tr>
       {% for s in breakout %}
       <tr>
@@ -212,6 +213,10 @@
         <td style="text-align:right;">{{ '%.1f'|format(s.turnover) }}%</td>
         <td style="text-align:right;">{{ s.vol_ratio }}</td>
         <td style="text-align:right;">{{ s.amount_yi }}</td>
+        <td style="font-size:10px;color:var(--text-secondary);">
+          <span style="color:var(--yellow);font-weight:600;">{{ s.stage|default('') }}</span>
+          <div>{{ s.signals|join(' · ') }}</div>
+        </td>
       </tr>
       {% endfor %}
     </table>

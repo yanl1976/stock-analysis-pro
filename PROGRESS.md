@@ -41,7 +41,7 @@ python3 core/cli.py portfolio [--action list/add/rm/update]  # 持仓管理
 
 # stock-analysis-pro 项目进度
 
-**最后更新**: 2026-07-14
+**最后更新**: 2026-07-17
 
 ---
 
@@ -475,6 +475,62 @@ python3 plans/concept_analysis.py
     ├── concept_cache.json  # 离线概念缓存(增量更新)
     └── watchlist.json      # 自选股列表
 ```
+
+---
+
+## 📋 2026-07-17 突破扫描 breakthrough — 概念技术突破增强版
+
+### 背景与定位
+概念板块分析(Req2) 已有"机会挖掘 → 技术突破"模块，其 `analysis/concept.py` 的 `_is_just_started()` / `breakout_stocks` 用**连涨天数 + 距月低涨幅**做轻量启发式判定。本次新增 `breakthrough` 命令，用严谨形态识别（BB挤压/VCP/MACD/KDJ/MA多头排列）替代粗判定。**已完成去重**：`analysis/concept.py` 的 `breakout_stocks` 与 `just_started` 计数现已直接调用 `analysis/breakout.classify_stage()`，全库仅保留一套形态识别逻辑，旧 `_is_just_started()` / `_get_limit_up_pct()` 已删除。
+
+### 新增模块
+| 模块 | 功能 |
+|------|------|
+| `analysis/breakout.py` | 纯函数形态识别：`classify_stage()` 七态分类 + 指标基元(sma/ema/macd/kdj/boll/bb_width/vol_ratio/atr) + `detect_platform`(平台带宽) + `vcp_contractions`(VCP收缩轮次) |
+| `plans/breakout_scan.py` | 端到端编排：热点版块→成分股→逐股K线→分类→评分排序；含K线磁盘缓存(TTL 1天) |
+| `templates/breakthrough_report.html` | 暗色主题 HTML 报告（状态徽标+评分+信号） |
+| `core/cli.py` | 新增 `breakthrough` 命令 |
+
+### 七态分类 (`classify_stage`)
+| 状态 | 含义 | 触发信号 |
+|------|------|----------|
+| `platform` 平台整理 | 波动收敛、箱体未破 | 布林带宽<15% + 持续≥20日 |
+| `about_to_launch` 即将启动 | 平台末端、变盘前夜 | 平台 + BB挤压极致 + VCP收缩 + MACD/KDJ金叉 |
+| `breakout` 突破 | 放量越过平台上沿 | 创N日新高 + 量能>20日均量×1.5 |
+| `running` 已运行 | 已主升、慎追高 | 远离MA、RSI超买 |
+| `falling` / `trending` / `unknown` | 其他 | — |
+
+### 评分维度 (0-100)
+形态分(平台干净度/收敛极致度) + 突破分(距上沿/量能) + 趋势分(MA多头/MACD/KDJ) + 板块分(版块资金排名) + 资金分(量比/换手)。
+
+### CLI
+```bash
+python core/cli.py breakthrough                      # 热点版块 Top5 × 每版块15只
+python core/cli.py breakthrough --concepts 3 --per 40
+python core/cli.py breakthrough --sector 风电
+python core/cli.py breakthrough --stage-filter about_to_launch
+python core/cli.py breakthrough --json / --html
+```
+
+### 修复的 BUG
+| Bug | 原因 | 修复 |
+|-----|------|------|
+| 成分股K线全部拉取失败(NoneType) | `fetch_concept_stocks_sina` 返回带 `sh/sz` 前缀的 symbol，`kline()` 内部二次拼接成 `szsh600236` 无效代码 | `breakout_scan.py` 新增 `_bare()` 剥前缀 |
+| Windows 控制台打印 `¥` 崩溃(gbk) | gbk 无法编码 U+00A5 | `breakout.py` / `breakout_scan.py` 的 `__main__` 加 UTF-8 重配置 |
+
+### 验证
+- 纯函数：茅台→`趋势中`、平安银行→`平台整理`(带宽0.148)、合成平台股→`平台整理`+正确信号 ✅
+- 端到端：扫描风电/光伏热点版块，成功拉取10只成分股并分类排序 ✅
+- HTML 模板：渲染成功 ✅
+
+### 去重改动 (concept.py 接入 classify_stage)
+| 改动 | 说明 |
+|------|------|
+| 删除 `_is_just_started()` / `_get_limit_up_pct()` | 旧"刚启动"启发式(连涨天数+距月低涨幅+涨停幅度)整体移除 |
+| 新增 `_rise_from_low()` | 仅保留"距月低涨幅"作为展示指标, 不再参与判定 |
+| `analyze_concept_deep` 逐股调用 `classify_stage()` | 单股形态识别统一数据源; `breakout_stocks` 改为筛选 `stage in (about_to_launch, breakout)` 按评分降序; `just_started` 计数改用 `stage` 判定 |
+| `batch_klines` datalen 30→250 | 支撑 classify_stage 的平台/BB挤压判定(原30日不足) |
+| 同步更新 | `plans/concept_analysis.py` 突破股标签、`templates/concept_report.html` 突破股表格(展示 stage+signals) |
 
 ---
 

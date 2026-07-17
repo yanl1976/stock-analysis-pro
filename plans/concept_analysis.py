@@ -383,7 +383,7 @@ def format_report(data: dict) -> str:
         # 突破股
         breakout = deep.get('breakout_stocks', [])
         if breakout:
-            lines.append(f"    🚀 新突破 (涨>5%且刚启动):")
+            lines.append(f"    🚀 形态突破/即将启动:")
             for s in breakout[:5]:
                 rise = s.get('rise_from_low', 0)
                 lines.append(f"      {s['symbol']} {s['name']} 涨{s['pct']:+.2f}% 距月低{rise:+.1f}% 量比{s['vol_ratio']}")
