@@ -80,8 +80,8 @@
 
 {# 四、买入建议与计划 #}
 <div class="section">
-  <div class="section-title"><span class="icon">💡</span> 买入建议与计划 (形态成功率 + 综合评级)</div>
-  <div style="font-size:12px;color:var(--text-muted);padding:0 12px 8px;">评级: 重点 &gt; 关注 &gt; 观察 &gt; 暂避 · 仓位为单标的上限建议</div>
+  <div class="section-title"><span class="icon">💡</span> 买入建议与计划 (形态成功率 + 综合评级 + 纪律买卖)</div>
+  <div style="font-size:12px;color:var(--text-muted);padding:0 12px 8px;">评级: 重点 &gt; 关注 &gt; 观察 &gt; 暂避 · 仓位为单标的上限建议 · 破止损离场 / 触目标止盈 / 盈利&gt;8%上移止损锁利</div>
   {% set rate_cls = {'重点':'var(--green)','关注':'var(--accent)','观察':'var(--yellow)','暂避':'var(--red)'} %}
   {% for c in candidates[:15] %}
   {% set rc = rate_cls.get(c.rating, 'var(--text-muted)') %}
@@ -93,11 +93,22 @@
       <span style="font-size:14px;font-weight:700;">{{ c.position or '—' }}%仓</span>
     </div>
     <div style="font-size:12px;color:var(--text-muted);padding:3px 0 1px 0;">
-      热点: {{ c.concepts|join('、') if c.concepts else c.concept }} · 模型分 {{ c.score }} · 止损 ¥{{ c.stop_loss }} ({{ c.stop_pct }}%)
+      热点: {{ c.concepts|join('、') if c.concepts else c.concept }} · 模型分 {{ c.score }} · 前期涨幅 {{ '%+.0f'|format(c.prior_runup) if c.prior_runup is defined and c.prior_runup is not none else '—' }}%
     </div>
-    <div style="font-size:12px;padding:1px 0 2px 0;">📍 买点: {{ c.buy_point }}</div>
+    <div style="font-size:12px;padding:1px 0 1px 0;">📍 买点: {{ c.buy_point }}</div>
+    <div style="font-size:12px;padding:1px 0 1px 0;">🛡 止损 ¥{{ c.stop_loss }} ({{ c.stop_pct }}%) · 🎯 目标 ¥{{ c.take_profit }}</div>
+    <div style="font-size:12px;color:var(--text-muted);padding:1px 0 2px 0;">🛒 {{ c.sell_hint }}</div>
   </div>
   {% endfor %}
+  {% set excluded = data.breakthrough.get('excluded', []) if data.breakthrough else [] %}
+  {% if excluded %}
+  <div class="card" style="margin-top:10px;border-left:3px solid var(--red);">
+    <div style="font-size:13px;font-weight:700;color:var(--red);margin-bottom:4px;">🚫 前期大涨不追 (已剔除, 等回踩不追高)</div>
+    <div style="font-size:12px;color:var(--text-muted);">
+      {% for e in excluded %}{{ e.name }}({{ e.symbol }}) 前期 {{ '%+.0f'|format(e.prior_runup) if e.prior_runup is not none else '—' }}%{% if not loop.last %} · {% endif %}{% endfor %}
+    </div>
+  </div>
+  {% endif %}
 </div>
 
 {% endblock %}

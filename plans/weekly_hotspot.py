@@ -12,6 +12,11 @@
   python plans/weekly_hotspot.py --concepts 10 --per 20
   python plans/weekly_hotspot.py --no-push              # 只生成报告不推送
   python plans/weekly_hotspot.py --json                 # 输出 JSON
+  python plans/weekly_hotspot.py --runup-days 20 --runup-pct 40   # 前期大涨不追阈值(前N日涨幅>%剔除)
+
+策略微调 (与 backtest_hotspot 回测结论一致):
+  · 前期大涨不追: 截至今天前 runup_days 日累计涨幅 > runup_pct% 直接剔除推荐 (等回踩不追高)
+  · 每只推荐自带纪律买卖: 买点 / 止损价 / 目标价(take_profit) / 仓位 / 卖出提示(移动止损锁利)
 """
 import os
 import sys
@@ -27,7 +32,7 @@ WATCHLIST_PATH = os.path.join(DATA_DIR, "watchlist.json")
 
 from collectors.concept import concept_rank_sina, fetch_concept_stocks_sina
 from plans.concept_analysis import filter_concepts
-from plans.breakout_scan import run as run_breakthrough, format_report as fmt_breakthrough
+from plans.breakout_scan import run as run_breakthrough, format_report as fmt_breakthrough, _kline_cached
 from core.cli import save_watchlist
 from analysis.breakout import STAGE_LABELS
 
@@ -96,14 +101,68 @@ def _build_plan(c, win_rate, rating):
     return buy, round(stop, 2), stop_pct, position
 
 
-def enrich_candidates(breakthrough):
-    """对突破候选去重 (同股票跨多热点) + 叠加 win_rate / rating / plan 字段。"""
+def _prior_runup(symbol, lookback=20, ref_date=None):
+    """截至 ref_date(默认最新交易日) 前 lookback 个交易日累计涨幅 — 捕捉'前期已大幅上涨'。
+
+    返回涨幅% 或 None (无数据/历史不足)。与 backtest_hotspot.prior_runup 同源逻辑。
+    """
+    try:
+        kl = _kline_cached(symbol)
+    except Exception:
+        return None
+    if not kl:
+        return None
+    if ref_date is None:
+        ref_date = kl[-1]["date"][:10]
+    idx = None
+    for i, b in enumerate(kl):
+        if b["date"][:10] <= ref_date:
+            idx = i
+        else:
+            break
+    if idx is None:
+        return None
+    base_i = max(0, idx - lookback)
+    base = kl[base_i]["close"]
+    price = kl[idx]["close"]
+    if base and price:
+        return round((price - base) / base * 100, 2)
+    return None
+
+
+def _sell_hint(buy_price, stage, stop_loss):
+    """生成卖出提示: 目标价 + 移动止损规则 (盈利后锁利)。"""
+    tp = round(buy_price * (1.18 if stage == "breakout" else 1.12), 2)
+    tp_pct = round((tp / buy_price - 1) * 100)
+    hint = (f"目标价≈¥{tp} (约+{tp_pct}%); 破¥{stop_loss}止损; "
+            f"盈利>8%后上移止损至成本价锁利")
+    return tp, hint
+
+
+def enrich_candidates(breakthrough, runup_days=20, runup_pct=40):
+    """对突破候选去重 (同股票跨多热点) + 叠加 win_rate / rating / plan 字段。
+
+    策略微调 (与回测一致):
+      · 前期大涨不追: 截至今天前 runup_days 日累计涨幅 > runup_pct% 视为'前期已大幅上涨,
+        从推荐列表剔除, 计入 excluded (不追)。
+      · 每只推荐附带 take_profit(目标价) + sell_hint(卖出提示: 目标价+移动止损)。
+    """
     if not breakthrough or "candidates" not in breakthrough or "error" in breakthrough:
         return breakthrough
     seen = {}
+    excluded = []
     for c in breakthrough["candidates"]:
         sym = c.get("symbol")
         if not sym:
+            continue
+        # ── 前期大涨不追 ──
+        runup = _prior_runup(sym, lookback=runup_days)
+        if runup is not None and runup >= runup_pct:
+            excluded.append({
+                "symbol": sym, "name": c.get("name", sym),
+                "price": c.get("price"), "prior_runup": runup,
+                "concepts": [c.get("concept")] if c.get("concept") else [],
+            })
             continue
         if sym in seen:
             # 合并概念 (同一股票出现在多个热点版块)
@@ -113,6 +172,7 @@ def enrich_candidates(breakthrough):
         wr = _estimate_win_rate(c.get("stage"), c.get("signals", []))
         rating = _rating(c.get("score", 0), wr, c.get("stage"))
         buy, stop, stop_pct, position = _build_plan(c, wr, rating)
+        tp, sell_hint = _sell_hint(float(c.get("price") or 0), c.get("stage"), stop)
         seen[sym] = {
             **c,
             "concepts": [c.get("concept")],
@@ -122,9 +182,13 @@ def enrich_candidates(breakthrough):
             "stop_loss": stop,
             "stop_pct": stop_pct,
             "position": position,
+            "prior_runup": runup,
+            "take_profit": tp,
+            "sell_hint": sell_hint,
         }
     enriched = sorted(seen.values(), key=lambda x: -x["score"])
-    return {**breakthrough, "candidates": enriched, "count": len(enriched)}
+    return {**breakthrough, "candidates": enriched, "count": len(enriched),
+            "excluded": excluded, "excluded_count": len(excluded)}
 
 
 def _bare(symbol: str) -> str:
@@ -221,22 +285,35 @@ def build_report(date_str: str, hotspots: list, watchlist_picks: list,
     if "error" in breakthrough:
         lines.append(f"  ❌ 突破扫描失败: {breakthrough['error']}")
     else:
-        lines.append(f"  候选 {breakthrough['count']} 只 (已去重), 按评分降序 Top 15:")
+        lines.append(f"  候选 {breakthrough['count']} 只 (已去重, 已剔除前期大涨不追 "
+                     f"{breakthrough.get('excluded_count', 0)} 只), 按评分降序 Top 15:")
         for i, c in enumerate(breakthrough["candidates"][:15], 1):
             sig = " | ".join(c.get("signals", [])[:3])
             wr = c.get("win_rate")
             wr_str = f" 成功率{wr*100:.0f}%" if isinstance(wr, (int, float)) else ""
+            ru = c.get("prior_runup")
+            ru_s = f" 前期{ru:+.0f}%" if isinstance(ru, (int, float)) else ""
             lines.append(
                 f"  {i}. {c['name']}({c['symbol']}) ¥{c['price']} {c['change_pct']:+.2f}% "
-                f"| {STAGE_LABELS.get(c['stage'], c['stage'])} 评分{c['score']}{wr_str}")
+                f"| {STAGE_LABELS.get(c['stage'], c['stage'])} 评分{c['score']}{wr_str}{ru_s}")
             lines.append(f"     热点:{'、'.join(c.get('concepts', [c.get('concept')]))} | {sig}")
+        # 被'前期大涨不追'剔除的清单
+        exc = breakthrough.get("excluded") or []
+        if exc:
+            lines.append(f"\n  🚫 前期大涨不追 (已剔除, 等回踩不追高):")
+            for e in exc[:15]:
+                ru = e.get("prior_runup")
+                ru_s = f"{ru:+.0f}%" if isinstance(ru, (int, float)) else "—"
+                lines.append(f"    · {e['name']}({e['symbol']}) ¥{e.get('price','—')} 前期{ru_s} "
+                             f"热点:{'、'.join(e.get('concepts', []))}")
 
     # 四、买入建议与计划
-    lines.append(f"\n【四、买入建议与计划 (形态成功率 + 综合评级)】")
+    lines.append(f"\n【四、买入建议与计划 (形态成功率 + 综合评级 + 纪律买卖)】")
     if "error" in breakthrough:
         lines.append("  (无数据)")
     else:
         lines.append("  评级: 重点 > 关注 > 观察 > 暂避 | 仓位为单标的上限建议")
+        lines.append("  纪律: 破止损价离场; 触目标价止盈; 盈利>8%上移止损至成本锁利")
         for i, c in enumerate(breakthrough["candidates"][:12], 1):
             wr = c.get("win_rate")
             wr_str = f"{wr*100:.0f}%" if isinstance(wr, (int, float)) else "—"
@@ -245,6 +322,7 @@ def build_report(date_str: str, hotspots: list, watchlist_picks: list,
                 f"成功率{wr_str} 模型分{c['score']} 仓位{c.get('position','—')}%")
             lines.append(f"     📍 买点: {c.get('buy_point','—')}")
             lines.append(f"     🛡 止损: ¥{c.get('stop_loss','—')} ({c.get('stop_pct','—')}%)")
+            lines.append(f"     🎯 目标: ¥{c.get('take_profit','—')}  | {c.get('sell_hint','—')}")
 
     lines.append(f"\n{'='*50}")
     lines.append("报告生成完毕")
@@ -262,6 +340,8 @@ def main():
     ap.add_argument("--concepts", type=int, default=8, help="热点版块数量 (默认8)")
     ap.add_argument("--per", type=int, default=15, help="突破扫描每版块成分股数 (默认15)")
     ap.add_argument("--watch-per", type=int, default=2, help="每版块入选自选股数 (默认2)")
+    ap.add_argument("--runup-days", type=int, default=20, help="前期涨幅回看交易日数 (默认20)")
+    ap.add_argument("--runup-pct", type=float, default=40, help="前期涨幅超此%则'不追'剔除 (默认40)")
     ap.add_argument("--no-push", action="store_true", help="仅生成报告, 不推送微信")
     ap.add_argument("--html", action="store_true", help="生成 HTML 报告文件 (输出 HTML_REPORT:<path>, 供 bot 附带发送)")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
@@ -289,8 +369,13 @@ def main():
         top_per_concept=args.per,
         verbose=True,
     )
-    # 3b. 去重 + 叠加 形态成功率 / 综合评级 / 买入计划
-    breakthrough = enrich_candidates(breakthrough)
+    # 3b. 去重 + 叠加 形态成功率 / 综合评级 / 买入计划 + 前期大涨不追过滤
+    breakthrough = enrich_candidates(breakthrough,
+                                     runup_days=args.runup_days,
+                                     runup_pct=args.runup_pct)
+    print(f"    选入 {breakthrough.get('count', 0)} 只, "
+          f"剔除前期大涨不追 {breakthrough.get('excluded_count', 0)} 只 "
+          f"(前{args.runup_days}日>{args.runup_pct}%不追)", flush=True)
 
     # 4. 报告
     report = build_report(date_str, hotspots, watchlist_picks, breakthrough)
