@@ -154,6 +154,69 @@ def clear_kline_cache():
     _kline_cache.clear()
 
 
+# ── 东财兼容适配器 (新浪源) ──
+# 替代 collectors/em_concept 的 push2 / Playwright 调用。
+# 当前网络环境对东方财富 push2 接口存在连接限制 (RemoteDisconnected),
+# 而新浪接口稳定且无需 Cookie, 故概念板块统一改用新浪源。
+
+def fetch_concept_list_sina(top_n: int = 30, verbose: bool = False) -> list:
+    """
+    新浪概念榜单 → 东财兼容结构。
+    bk_code 存新浪 node code (如 gn_fd), 供 fetch_concept_stocks_sina 使用。
+    """
+    raw = concept_rank_sina(limit=top_n * 3)
+    out = []
+    for c in raw:
+        out.append({
+            'name': c['name'],
+            'bk_code': c['code'],
+            'change_pct': c.get('change_pct', 0),
+            'net_inflow': 0,
+            'up_count': 0,
+            'down_count': 0,
+            'stock_count': c.get('stock_count', 0),
+            'leader': c.get('leader_name', ''),
+            'leader_code': c.get('leader_code', ''),
+            'leader_pct': c.get('leader_pct', 0),
+        })
+    return out[:top_n]
+
+
+def fetch_concept_stocks_sina(bk_code: str, name: str = '', limit: int = 100, verbose: bool = False) -> list:
+    """
+    新浪概念成分股 → 东财兼容结构 (字段名对齐 change_pct/turnover/price)。
+    bk_code: 新浪 node code, 如 gn_fd
+    """
+    raw = concept_stocks(bk_code, num=limit, sort='changepercent')
+    out = []
+    for s in raw:
+        try:
+            pct = float(s.get('changepercent', 0) or 0)
+        except (ValueError, TypeError):
+            pct = 0
+        try:
+            amount = float(s.get('amount', 0) or 0)
+        except (ValueError, TypeError):
+            amount = 0
+        try:
+            turnover = float(s.get('turnoverratio', 0) or 0)
+        except (ValueError, TypeError):
+            turnover = 0
+        try:
+            price = float(s.get('trade', 0) or 0)
+        except (ValueError, TypeError):
+            price = 0
+        out.append({
+            'symbol': s.get('symbol', ''),
+            'name': s.get('name', ''),
+            'change_pct': pct,
+            'price': price,
+            'amount': amount,
+            'turnover': turnover,
+        })
+    return out
+
+
 # 概念名称 → 扩展搜索关键词映射
 _NEWS_KEYWORDS = {
     '风电': ['风电', '风力', '风能', '海上风电', '风机'],

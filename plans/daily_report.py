@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import load_config
 from collectors.quote import batch_quotes_tencent, market_indices
 from collectors.breadth import fetch_breadth, fetch_limit_stats
-from collectors.em_concept import fetch_concept_list, fetch_concept_stocks
+from collectors.concept import fetch_concept_list_sina
 from collectors.macro import global_macro
 
 
@@ -132,11 +132,11 @@ def run(date=None, verbose=True):
 
     time.sleep(0.5)
 
-    # 4. 概念资金流 Top10
+    # 4. 概念资金流 Top10 (新浪源)
     if verbose:
-        print("💰 采集概念资金流...", file=sys.stderr)
+        print("💰 采集概念板块...", file=sys.stderr)
     try:
-        concepts = fetch_concept_list(top_n=10)
+        concepts = fetch_concept_list_sina(top_n=10)
         result['concepts'] = concepts
     except Exception as e:
         if verbose:

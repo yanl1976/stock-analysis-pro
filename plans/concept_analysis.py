@@ -115,12 +115,22 @@ def run(target_count=10, verbose=True, use_cache=True, stage='all'):
                 return cached_list
 
         if verbose:
-            print("  Step 1: 获取概念榜单 (requests, 仅列表, 秒级)...")
-        from collectors.em_concept import fetch_concept_list
+            print("  Step 1: 获取概念榜单 (新浪源, 仅列表, 秒级)...")
+        from collectors.concept import concept_rank_sina
 
-        # 纯 requests 调 push2 clist 接口, 字段完整(涨跌幅/领涨股), 无需 Playwright
-        raw = fetch_concept_list(top_n=target_count * 3, verbose=verbose)
-        top = filter_concepts(raw)[:target_count]
+        # 新浪源 (无需 Cookie/Playwright; 当前网络环境东财 push2 不可用)
+        raw = concept_rank_sina(limit=target_count * 3)
+        mapped = [{
+            'name': c['name'],
+            'bk_code': c['code'],
+            'change_pct': c.get('change_pct', 0),
+            'net_inflow': 0,
+            'up_count': 0,
+            'down_count': 0,
+            'leader': c.get('leader_name', ''),
+            'leader_code': c.get('leader_code', ''),
+        } for c in raw]
+        top = filter_concepts(mapped)[:target_count]
 
         list_out = {
             "date": date_str,
@@ -155,27 +165,24 @@ def run(target_count=10, verbose=True, use_cache=True, stage='all'):
         if verbose:
             print(f"  [读取榜单缓存] {len(top)} 个概念, 开始拉成分股...")
 
-    from collectors.em_concept import fetch_concepts_batch
+    from collectors.concept import fetch_concept_stocks_sina
 
-    def _filter_and_pick(concepts):
-        filtered = filter_concepts(concepts)
-        return filtered[:target_count]
-
-    # 拉成分股 (Playwright, 逐个板块, 间隔5秒)
+    # 拉成分股 (新浪源, 逐个板块)
     if verbose:
-        print("  Step 2: 拉取成分股 (Playwright, 逐个板块)...")
-    batch = fetch_concepts_batch(
-        top_n=60,
-        stocks_limit=100,
-        verbose=verbose,
-        fetch_stocks_for=[{'bk_code': c['bk_code'], 'name': c['name']} for c in top],
-    )
-    stocks_map = batch.get('stocks_map', {})
+        print("  Step 2: 拉取成分股 (新浪源, 逐个板块)...")
+    stocks_map = {}
+    for c in top:
+        bk_code = c['bk_code']
+        stocks = fetch_concept_stocks_sina(bk_code, name=c['name'], limit=100)
+        stocks_map[bk_code] = stocks
+        if verbose:
+            print(f"    {c['name']}: {len(stocks)}只成分股")
+        time.sleep(0.3)
 
     if not top:
         print("\n  ⚠️ 无法获取概念排行！可能原因：")
-        print("  1. Playwright未安装或浏览器启动失败")
-        print("  2. 网络问题 → 检查是否能访问 data.eastmoney.com")
+        print("  1. 新浪接口网络异常 → 检查是否能访问 vip.stock.finance.sina.com.cn")
+        print("  2. 当日无交易数据 (休市)")
         print("  💡 如有离线缓存将自动降级使用\n")
         return {"error": "无法获取概念排行", "date": date_str}
 
@@ -287,13 +294,29 @@ def run(target_count=10, verbose=True, use_cache=True, stage='all'):
 
 
 def format_report(data: dict) -> str:
-    """格式化输出报告 (文本版)"""
+    """格式化输出报告 (文本版)
+
+    兼容两种数据源:
+    - stage='all'/'detail' (深度分析): 含 amount_yi / leader_pct / deep / trend / news
+    - stage='list' (轻量榜单): 仅 change_pct / net_inflow / leader / leader_code
+    缺失深度字段时自动降级展示, 不抛 KeyError。
+    """
     if "error" in data:
         return f"❌ 错误: {data['error']}"
 
+    is_list = all('amount_yi' not in c and 'deep' not in c for c in data.get('concepts', []))
+    title = "概念板块榜单 (快速)" if is_list else "概念板块深度分析报告"
+
     lines = []
-    lines.append(f"📊 概念板块深度分析报告 ({data['date']})")
+    lines.append(f"📊 {title} ({data['date']})")
     lines.append(f"{'='*50}")
+
+    if not data.get('concepts'):
+        lines.append("\n⚠️ 当前未能获取概念榜单数据。")
+        lines.append("可能原因：新浪概念接口网络异常 / 当日休市无数据。")
+        lines.append("→ 稍后重试。")
+        lines.append("\n报告生成完毕")
+        return '\n'.join(lines)
 
     for i, c in enumerate(data['concepts'], 1):
         lines.append(f"\n{'─'*50}")
@@ -302,19 +325,38 @@ def format_report(data: dict) -> str:
         score_label = score.get('label', '--')
         score_val = score.get('total', 0)
 
-        lines.append(f"【{i}】{c['name']}  {c['change_pct']:+.2f}%  成交{c['amount_yi']}亿")
-        lines.append(f"    评分: {score_val}分 {score_label}")
-        lines.append(f"    龙头: {c['leader']}({c['leader_code']}) {c['leader_pct']:+.2f}%")
+        # 成交额: 深度模式用 amount_yi, 榜单模式用 net_inflow (净流入) 兜底
+        if 'amount_yi' in c:
+            amount_str = f"成交{c['amount_yi']}亿"
+        elif c.get('net_inflow') is not None:
+            amount_str = f"净流入{c['net_inflow']}亿"
+        else:
+            amount_str = ""
+        lines.append(f"【{i}】{c['name']}  {c['change_pct']:+.2f}%  {amount_str}")
 
-        # 趋势
-        t = c.get('trend', {})
-        if t.get('status') != 'unknown':
+        # 深度模式才有的评分
+        if not is_list:
+            lines.append(f"    评分: {score_val}分 {score_label}")
+
+        # 龙头: 榜单模式可能无 leader_pct
+        leader = c.get('leader', '')
+        leader_code = c.get('leader_code', '')
+        if 'leader_pct' in c:
+            lines.append(f"    龙头: {leader}({leader_code}) {c['leader_pct']:+.2f}%")
+        elif leader:
+            lines.append(f"    龙头: {leader}({leader_code})")
+
+
+        # 趋势 (仅深度模式有 trend 字段; 榜单模式 t 为空 dict, 跳过)
+        t = c.get('trend') or {}
+        t_status = t.get('status')
+        if t_status and t_status != 'unknown':
             status_map = {
                 'breakout': '🚀 金叉启动', 'strong': '🔥 主升浪',
                 'rising': '📈 上升期', 'weak_rise': '↗️ 弱上升',
                 'weak': '↔️ 震荡', 'falling': '📉 下跌',
             }
-            label = status_map.get(t['status'], t['status'])
+            label = status_map.get(t_status, t_status)
             lines.append(f"    趋势: {label} — {t.get('reason', '')}")
 
         # 深度分析

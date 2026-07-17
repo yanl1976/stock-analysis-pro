@@ -13,9 +13,11 @@
 import time
 from typing import Optional
 
+from collectors.concept import (
+    fetch_concept_list_sina,
+    fetch_concept_stocks_sina,
+)
 from collectors.em_concept import (
-    fetch_concept_list,
-    fetch_concept_stocks,
     get_cached_stocks,
     _load_cache,
 )
@@ -57,13 +59,13 @@ def rank_concepts(
             ...
         ]
     """
-    # Step 1: 获取概念列表 (按资金流入排序, 过滤非行业, 保留top_n个)
-    concepts = fetch_concept_list(top_n=top_n, verbose=verbose)
+    # Step 1: 获取概念列表 (新浪源, 过滤非行业, 保留top_n个)
+    concepts = fetch_concept_list_sina(top_n=top_n, verbose=verbose)
     if not concepts:
         return []
     
     if verbose:
-        print(f"  概念列表: {len(concepts)} 个 (按资金流入排序)")
+        print(f"  概念列表: {len(concepts)} 个 (新浪源)")
     
     results = []
     
@@ -73,7 +75,7 @@ def rank_concepts(
         
         if fetch_stocks:
             # ── 完整模式: 拉成分股，计算精确统计 ──
-            stocks = fetch_concept_stocks(bk_code, name=name, limit=100, verbose=verbose)
+            stocks = fetch_concept_stocks_sina(bk_code, name=name, limit=100, verbose=verbose)
             
             if len(stocks) < min_stocks:
                 if verbose:
@@ -162,6 +164,9 @@ def rank_concepts(
             api_up = c.get('up_count', 0) or 0
             api_dn = c.get('down_count', 0) or 0
             total = api_up + api_dn
+            if total == 0:
+                # 新浪源不提供涨跌家数, 退而用成分股总数做门槛判断
+                total = c.get('stock_count', 0) or 0
             
             if total < min_stocks:
                 if verbose:
@@ -205,7 +210,7 @@ def rank_concepts(
 
 def get_concept_detail(bk_code: str, concept_name: str = '') -> Optional[dict]:
     """获取单个概念的详细数据 (成分股行情)"""
-    stocks = fetch_concept_stocks(bk_code, name=concept_name, limit=100)
+    stocks = fetch_concept_stocks_sina(bk_code, name=concept_name, limit=100)
     
     stock_details = []
     for s in stocks:

@@ -2,8 +2,11 @@
 """实时行情 & 历史 K 线采集 — 腾讯 + 新浪"""
 
 import re
+import time
 import requests
 from typing import List, Dict
+
+_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
 
 def _prefix_symbol(symbol: str) -> str:
@@ -22,21 +25,46 @@ def _normalize_symbol(symbol: str) -> str:
     return _prefix_symbol(symbol)
 
 
-def realtime(symbol: str) -> Dict:
-    """腾讯实时行情，返回价格/涨跌幅/PE/PB/市值/换手率等"""
+def realtime(symbol: str, retries: int = 3) -> Dict:
+    """腾讯实时行情，返回价格/涨跌幅/PE/PB/市值/换手率等。
+
+    带 UA 头 + 重试，避免偶发限流/网络抖动导致字段不足直接崩溃。
+    """
     sym = _prefix_symbol(symbol)
     url = f"https://qt.gtimg.cn/q={sym}"
-    resp = requests.get(url, timeout=5)
-    resp.encoding = "gbk"
-    text = resp.text.strip()
-    
-    if "unknown" in text:
-        raise ValueError(f"Symbol {symbol} not found")
-    
-    d = text.split("~")
-    if len(d) < 53:
-        raise ValueError("Unexpected response format")
-    
+    last_err = None
+    for attempt in range(retries):
+        try:
+            resp = requests.get(
+                url,
+                headers={"User-Agent": _UA, "Referer": "https://gu.qq.com/"},
+                timeout=8,
+            )
+            resp.encoding = "gbk"
+            text = resp.text.strip()
+
+            if "unknown" in text:
+                raise ValueError(f"Symbol {symbol} not found")
+
+            d = text.split("~")
+            if len(d) < 53:
+                # 偶发脏响应/限流，重试
+                raise ValueError("Unexpected response format")
+
+            return _parse_realtime(d)
+        except ValueError as e:
+            # 代码不存在无需重试
+            if "not found" in str(e):
+                raise
+            last_err = e
+        except Exception as e:
+            last_err = e
+        if attempt < retries - 1:
+            time.sleep(0.6 * (attempt + 1))
+    raise last_err if last_err else ValueError("Unexpected response format")
+
+
+def _parse_realtime(d: list) -> Dict:
     return {
         "name": d[1],
         "code": d[2],

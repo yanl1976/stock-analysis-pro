@@ -50,8 +50,13 @@ def _load_prev_snapshot(symbol: str) -> dict:
         return {}
 
 
-def run(symbol: str) -> dict:
-    """执行个股分析计划"""
+def run(symbol: str, use_browser: bool = True) -> dict:
+    """执行个股分析计划
+
+    use_browser=False 时跳过 Playwright 浏览器采集，直接走各分析模块的直连回退，
+    适合无头环境 / 企微机器人等追求速度的场景（F10/股吧/研报等补充数据会缺失，
+    但行情/技术/基本面/资金/估值/评分等核心维度不受影响）。
+    """
     result = {"symbol": symbol}
     
     # 1. 实时行情 (被多个维度共享, 走腾讯不限速)
@@ -72,11 +77,14 @@ def run(symbol: str) -> dict:
     
     # 2. 东财数据 (Playwright 统一获取，避免直连被限流)
     em_data = None
-    try:
-        from collectors.em_browser import fetch_all_stock_data
-        em_data = fetch_all_stock_data(symbol, verbose=True)
-    except Exception as e:
-        print(f"  [警告] Playwright 东财数据采集失败: {e}, 回退到直连")
+    if use_browser:
+        try:
+            from collectors.em_browser import fetch_all_stock_data
+            em_data = fetch_all_stock_data(symbol, verbose=True)
+        except Exception as e:
+            print(f"  [警告] Playwright 东财数据采集失败: {e}, 回退到直连")
+    else:
+        print("  [提示] 已跳过 Playwright 浏览器采集 (use_browser=False)，改走直连")
     
     # 3. 公司概况
     f10_data = em_data.get("f10") if em_data else None

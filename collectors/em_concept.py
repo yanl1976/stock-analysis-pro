@@ -609,65 +609,72 @@ def fetch_concept_list(top_n: int = 30, verbose: bool = False) -> list:
         po=1,       # 降序
     )
     
-    try:
-        resp = requests.get(_BASE_URL, params=params, headers=headers, timeout=15)
-        if not resp.text or 'jQuery' not in resp.text:
-            print("[em_concept] ⚠️ Cookie可能已过期或无效")
-            print("  → 请重新获取: 浏览器打开 https://quote.eastmoney.com/bk/ → F12 → Network → 复制新Cookie")
-            print("  → 更新配置: 编辑 config/config.yaml，替换 eastmoney.cookie 的值")
-            print("  ⚠️ 将降级使用离线缓存（数据可能不是最新的）")
-            return []
+    last_err = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(_BASE_URL, params=params, headers=headers, timeout=15)
+            if not resp.text or 'jQuery' not in resp.text:
+                print("[em_concept] ⚠️ Cookie可能已过期或无效")
+                print("  → 请重新获取: 浏览器打开 https://quote.eastmoney.com/bk/ → F12 → Network → 复制新Cookie")
+                print("  → 更新配置: 编辑 config/config.yaml，替换 eastmoney.cookie 的值")
+                print("  ⚠️ 将降级使用离线缓存（数据可能不是最新的）")
+                return []
             
-        data = _jsonp_parse(resp.text)
-        if not data or not data.get('data'):
+            data = _jsonp_parse(resp.text)
+            if not data or not data.get('data'):
+                if verbose:
+                    print(f"[em_concept] 解析失败: {resp.text[:200]}")
+                return []
+        
+            items = data['data'].get('diff', [])
+            results = []
+        
+            for item in items:
+                name = item.get('f14', '')
+                if _should_filter(name):
+                    continue
+            
+                bk_code = item.get('f12', '')
+            
+                # 领涨股
+                leader_name = item.get('f140', '')
+                leader_code_raw = item.get('f141', '')
+                leader_market = item.get('f136', 0)
+            
+                if leader_code_raw:
+                    prefix = 'sh' if leader_market == 1 else 'sz'
+                    leader_sym = f'{prefix}{leader_code_raw}'
+                else:
+                    leader_sym = ''
+            
+                results.append({
+                    'bk_code': bk_code,
+                    'name': name,
+                    'change_pct': item.get('f3', 0),
+                    'net_inflow': item.get('f62', 0),
+                    'up_count': item.get('f104', 0),
+                    'down_count': item.get('f105', 0),
+                    'leader': leader_name,
+                    'leader_code': leader_sym,
+                    'leader_pct': item.get('f136', 0) if isinstance(item.get('f136', 0), (int, float)) else 0,
+                })
+            
+                if len(results) >= top_n:
+                    break
+        
             if verbose:
-                print(f"[em_concept] 解析失败: {resp.text[:200]}")
-            return []
+                print(f"[em_concept] 资金流入排序, 过滤后保留 {len(results)} 个概念 (拉取{fetch_count}个)")
         
-        items = data['data'].get('diff', [])
-        results = []
-        
-        for item in items:
-            name = item.get('f14', '')
-            if _should_filter(name):
-                continue
-            
-            bk_code = item.get('f12', '')
-            
-            # 领涨股
-            leader_name = item.get('f140', '')
-            leader_code_raw = item.get('f141', '')
-            leader_market = item.get('f136', 0)
-            
-            if leader_code_raw:
-                prefix = 'sh' if leader_market == 1 else 'sz'
-                leader_sym = f'{prefix}{leader_code_raw}'
-            else:
-                leader_sym = ''
-            
-            results.append({
-                'bk_code': bk_code,
-                'name': name,
-                'change_pct': item.get('f3', 0),
-                'net_inflow': item.get('f62', 0),
-                'up_count': item.get('f104', 0),
-                'down_count': item.get('f105', 0),
-                'leader': leader_name,
-                'leader_code': leader_sym,
-                'leader_pct': item.get('f136', 0) if isinstance(item.get('f136', 0), (int, float)) else 0,
-            })
-            
-            if len(results) >= top_n:
-                break
-        
-        if verbose:
-            print(f"[em_concept] 资金流入排序, 过滤后保留 {len(results)} 个概念 (拉取{fetch_count}个)")
-        
-        return results
-        
-    except Exception as e:
-        print(f"[em_concept] 获取概念列表失败: {e}")
-        return []
+            return results
+
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(0.8 * (attempt + 1))
+                if verbose:
+                    print(f"[em_concept] 第{attempt+1}次获取失败({e}), 重试…")
+    print(f"[em_concept] 获取概念列表失败: {last_err}")
+    return []
 
 
 def fetch_concept_stocks(bk_code: str, name: str = '', limit: int = 100, verbose: bool = False) -> list:

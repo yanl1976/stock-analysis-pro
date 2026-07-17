@@ -36,6 +36,9 @@ config/user.yaml
 data/watchlist.json
 cache/
 
+# Secrets (含企业微信等密钥配置)
+.env
+
 # OS
 .DS_Store
 Thumbs.db

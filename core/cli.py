@@ -8,10 +8,32 @@ import json
 import argparse
 from datetime import datetime
 
+# 强制 stdout/stderr 使用 UTF-8，避免 Windows 控制台默认 gbk 无法编码 ¥/✓ 等字符崩溃
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 DATA_DIR = os.path.join(BASE_DIR, "data")
 WATCHLIST_PATH = os.path.join(DATA_DIR, "watchlist.json")
+
+
+# 内置默认自选股 (无 watchlist.json 时兜底, 覆盖主要行业龙头)
+DEFAULT_WATCHLIST = [
+    "600519",  # 贵州茅台
+    "300750",  # 宁德时代
+    "002594",  # 比亚迪
+    "601318",  # 中国平安
+    "600036",  # 招商银行
+    "600900",  # 长江电力
+    "300059",  # 东方财富
+    "600030",  # 中信证券
+    "000725",  # 京东方A
+    "601012",  # 隆基绿能
+]
 
 
 def get_watchlist():
@@ -19,6 +41,12 @@ def get_watchlist():
         return []
     with open(WATCHLIST_PATH, "r") as f:
         return json.load(f)
+
+
+def get_watchlist_effective():
+    """返回实际自选股; 若文件不存在/为空, 返回内置默认清单 (兜底用)。"""
+    wl = get_watchlist()
+    return wl if wl else list(DEFAULT_WATCHLIST)
 
 
 def save_watchlist(lst):
@@ -62,13 +90,15 @@ def print_summary(data):
 
 def main():
     parser = argparse.ArgumentParser(description="Stock Analysis Pro — A股多维分析工具")
-    parser.add_argument("command", choices=["analyze", "market", "analyze-all", "add", "rm", "list", "concept", "review", "options", "portfolio"])
-    parser.add_argument("symbol", nargs="?", help="Stock code")
+    parser.add_argument("command", choices=["analyze", "market", "analyze-all", "add", "rm", "list", "clear", "concept", "review", "options", "portfolio"])
+    parser.add_argument("symbol", nargs="*", help="Stock code(s), 支持多个 (空格分隔)")
     parser.add_argument("--date", help="Date YYYYMMDD")
     parser.add_argument("--json", action="store_true", help="JSON output")
     parser.add_argument("--brief", action="store_true", help="Brief output")
     parser.add_argument("--summary", action="store_true", help="Compact JSON summary for agent consumption")
     parser.add_argument("--html", action="store_true", help="Generate HTML report file (outputs file path to stdout)")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="跳过 Playwright 浏览器采集，改走直连 (更快/无头环境/企微机器人)")
     parser.add_argument("--top", type=int, default=10, help="Top N results (options/concept)")
     parser.add_argument("--stage", choices=["all", "list", "detail"], default="all",
                         help="concept: all=一步完成(默认); list=快速仅榜单; detail=慢速拉成分股(需先list)")
@@ -85,11 +115,11 @@ def main():
                 print("Error: stock code required", file=sys.stderr)
                 sys.exit(1)
             from plans.stock_analysis import run
-            data = run(args.symbol)
+            data = run(args.symbol, use_browser=not args.no_browser)
             if args.html:
+                print_report(data)
                 from core.html_renderer import render
-                path = render(data, "stock_report")
-                print(path)
+                print(f"HTML_REPORT:{render(data, 'stock_report')}")
             elif args.summary:
                 print_summary(data)
             elif args.json:
@@ -103,32 +133,48 @@ def main():
             from plans.daily_review import run as run_market, format_report as format_market
             data = run_market(date=args.date, verbose=not args.json and not args.html)
             if args.html:
+                print(format_market(data))
                 from core.html_renderer import render
-                path = render(data, "market_report")
-                print(path)
+                print(f"HTML_REPORT:{render(data, 'market_report')}")
             elif args.json:
                 print(json.dumps(data, ensure_ascii=False, indent=2))
             else:
                 print(format_market(data))
 
         elif args.command == "analyze-all":
-            wl = get_watchlist()
-            if not wl:
-                print("Watchlist empty", file=sys.stderr)
-                sys.exit(1)
+            wl = get_watchlist_effective()
+            if wl == DEFAULT_WATCHLIST:
+                print("ℹ️ 未配置自选股 (data/watchlist.json 为空), 使用内置默认清单 10 只龙头股。", file=sys.stderr)
+                print("   可用 `python core/cli.py add 600000` 添加, `list` 查看。", file=sys.stderr)
             from plans.stock_analysis import run
-            for sym in wl:
-                data = run(sym)
-                print_report(data)
-                print("=" * 60)
+            if args.html:
+                stocks = []
+                for sym in wl:
+                    try:
+                        stocks.append(run(sym, use_browser=not args.no_browser))
+                    except Exception as e:
+                        print(f"  ⚠️ {sym} 分析失败: {e}", file=sys.stderr)
+                # 按综合评分降序排列
+                stocks.sort(key=lambda d: (d.get("score", {}) or {}).get("total_score", 0), reverse=True)
+                for d in stocks:
+                    print_report(d)
+                    print("=" * 60)
+                from core.html_renderer import render
+                agg = {"date": datetime.now().strftime("%Y-%m-%d"), "stocks": stocks}
+                print(f"HTML_REPORT:{render(agg, 'watchlist_report', filename='watchlist_report_' + datetime.now().strftime('%Y%m%d_%H%M') + '.html')}")
+            else:
+                for sym in wl:
+                    data = run(sym)
+                    print_report(data)
+                    print("=" * 60)
 
         elif args.command == "concept":
             from plans.concept_analysis import run as run_concept, format_report
             data = run_concept(target_count=args.top, verbose=False, stage=args.stage)
             if args.html:
+                print(format_report(data))
                 from core.html_renderer import render
-                path = render(data, "concept_report")
-                print(path)
+                print(f"HTML_REPORT:{render(data, 'concept_report')}")
             elif args.json:
                 print(json.dumps(data, ensure_ascii=False, indent=2))
             else:
@@ -139,20 +185,31 @@ def main():
                 print("Error: stock code required", file=sys.stderr)
                 sys.exit(1)
             wl = get_watchlist()
-            if args.symbol not in wl:
-                wl.append(args.symbol)
+            added = []
+            for sym in args.symbol:
+                if sym not in wl:
+                    wl.append(sym)
+                    added.append(sym)
+            if added:
                 save_watchlist(wl)
-                print(f"Added {args.symbol}")
+            print(f"Added {len(added)}/{len(args.symbol)}: {', '.join(added) or '(均已存在)'}")
+            if len(added) != len(args.symbol):
+                dup = [s for s in args.symbol if s not in added]
+                print(f"  (已跳过重复: {', '.join(dup)})")
 
         elif args.command == "rm":
             if not args.symbol:
                 print("Error: stock code required", file=sys.stderr)
                 sys.exit(1)
             wl = get_watchlist()
-            if args.symbol in wl:
-                wl.remove(args.symbol)
+            removed = []
+            for sym in args.symbol:
+                if sym in wl:
+                    wl.remove(sym)
+                    removed.append(sym)
+            if removed:
                 save_watchlist(wl)
-                print(f"Removed {args.symbol}")
+            print(f"Removed {len(removed)}/{len(args.symbol)}: {', '.join(removed) or '(均不在列表)'}")
 
         elif args.command == "list":
             wl = get_watchlist()
@@ -160,13 +217,17 @@ def main():
             for s in wl:
                 print(f"  {s}")
 
+        elif args.command == "clear":
+            save_watchlist([])
+            print("Watchlist cleared (0 stocks). `analyze-all` 将回退到内置默认清单。")
+
         elif args.command == "review":
             from plans.daily_report import run as run_review, format_report as format_review
             data = run_review(date=args.date, verbose=not args.json and not args.html)
             if args.html:
+                print(format_review(data))
                 from core.html_renderer import render
-                path = render(data, "review_report")
-                print(path)
+                print(f"HTML_REPORT:{render(data, 'review_report')}")
             elif args.json:
                 print(json.dumps(data, ensure_ascii=False, indent=2))
             else:
@@ -176,9 +237,9 @@ def main():
             from plans.options_scan import run_scan as run_options, print_summary as print_options_summary
             data = run_options(underlying=args.symbol, top_n=args.top)
             if args.html:
+                print_options_summary(data)
                 from core.html_renderer import render
-                path = render(data, "options_report")
-                print(path)
+                print(f"HTML_REPORT:{render(data, 'options_report')}")
             elif args.json:
                 print(json.dumps(data, ensure_ascii=False, indent=2))
             else:
