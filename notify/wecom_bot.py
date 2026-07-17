@@ -309,7 +309,13 @@ async def handle_message(client, frame):
 
     # 支持 HTML 报告的指令: 自动追加 --html, 生成报告文件后一并发送
     _HTML_CMDS = {"market", "review", "concept", "options", "analyze", "analyze-all"}
-    run_args = args + (["--html"] if args and args[0] in _HTML_CMDS else [])
+    # 机器人场景跳过 Playwright 浏览器采集 (快且 Windows 不崩); 概念走 list 阶段本就无需浏览器, 不加
+    _NO_BROWSER_CMDS = {"market", "review", "options", "analyze", "analyze-all"}
+    run_args = list(args)
+    if args and args[0] in _HTML_CMDS:
+        run_args.append("--html")
+    if args and args[0] in _NO_BROWSER_CMDS:
+        run_args.append("--no-browser")
 
     # 先发"分析中"状态 (无论 append/replace 语义都自然)
     try:
@@ -346,7 +352,17 @@ async def handle_message(client, frame):
 
     # 附上 HTML 报告文件 (复用当前连接)
     if html_path and os.path.exists(html_path):
-        await send_file_on_client(client, html_path, target)
+        ok = await send_file_on_client(client, html_path, target)
+        if not ok:
+            # 文件发送失败不该静默: 在对话里给出可见提示, 便于排查
+            try:
+                await client.reply_stream(
+                    frame, _GEN_REQ_ID("stream"),
+                    "⚠️ HTML 报告文件发送失败（详见服务端 stderr 日志），上方摘要已正常发送。",
+                    True,
+                )
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------

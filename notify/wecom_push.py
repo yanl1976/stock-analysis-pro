@@ -29,7 +29,13 @@ async def push(args, target=None):
 
     # 支持 HTML 报告的指令: 自动追加 --html, 生成报告文件后一并发送
     _HTML_CMDS = {"market", "review", "concept", "options", "analyze", "analyze-all"}
-    run_args = args + (["--html"] if args and args[0] in _HTML_CMDS else [])
+    # 机器人场景跳过 Playwright 浏览器采集 (快且 Windows 不崩); 概念走 list 阶段本就无需浏览器, 不加
+    _NO_BROWSER_CMDS = {"market", "review", "options", "analyze", "analyze-all"}
+    run_args = list(args)
+    if args and args[0] in _HTML_CMDS:
+        run_args.append("--html")
+    if args and args[0] in _NO_BROWSER_CMDS:
+        run_args.append("--no-browser")
 
     client = build_client()
     await client.connect()
@@ -60,7 +66,12 @@ async def push(args, target=None):
 
     # 附上 HTML 报告文件 (复用当前连接)
     if html_path and os.path.exists(html_path):
-        await send_file_on_client(client, html_path, chat_id)
+        ok = await send_file_on_client(client, html_path, chat_id)
+        if not ok:
+            await client.send_message(chat_id, {
+                "msgtype": "markdown",
+                "markdown": {"content": "⚠️ HTML 报告文件发送失败（详见服务端 stderr 日志），上方摘要已正常发送。"},
+            })
 
     client.disconnect()
     print(f"[WECOM-PUSH] 已推送 {len(_split_by_bytes(summary_text))} 条到 {chat_id}", flush=True)
