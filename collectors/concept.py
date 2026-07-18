@@ -17,6 +17,50 @@ FILTER_KEYWORDS = [
     '新能源', '节能环保', '低碳', '稀缺', '涉矿'
 ]
 
+# ── 语义同义概念归一 ──
+# 新浪概念榜常把同一赛道拆成多个近义板块 (风电/风能、光伏/太阳能、锂电池/锂电…),
+# 既占掉多个热点位, 成分股又高度重叠。归一后保留更热(成交额更大/更靠前)的一条。
+_CONCEPT_SYNONYMS = {
+    '风能': '风电', '风力发电': '风电', '海上风电': '风电',
+    '太阳能': '光伏', '光伏发电': '光伏',
+    '锂电': '锂电池', '锂矿': '锂电池',
+    '国防军工': '军工', '军民融合': '军工',
+    '芯片': '半导体', '集成电路': '半导体',
+    '新能源汽车': '新能源车', '特斯拉': '新能源车',
+    '地产': '房地产', '房地产开发': '房地产',
+    '氢能源': '氢能',
+    'AI': '人工智能',
+    '稀土永磁': '稀土',
+}
+
+
+def merge_duplicate_concepts(concepts, name_key='name', code_key='bk_code',
+                             amount_key='amount'):
+    """语义同义概念归一: 同名归并到 canonical, 保留成交额更大(或更靠前)的一条。
+
+    concepts 元素为 dict, 含 name_key/code_key/amount_key。返回去重后的列表 (保持原相对顺序)。
+    用于热点榜/突破扫描, 避免 风电+风能 等近义板块重复占热点位、重复扫描。
+    """
+    canon = {}      # canonical_name -> concept dict
+    order = []      # 保持顺序
+    for c in concepts:
+        name = c.get(name_key, '')
+        key = _CONCEPT_SYNONYMS.get(name, name)
+        if key in canon:
+            prev = canon[key]
+            try:
+                if float(c.get(amount_key, 0) or 0) > float(prev.get(amount_key, 0) or 0):
+                    order = [x for x in order if x is not prev]   # 当前更热 → 替换
+                    canon[key] = c
+                    order.append(c)
+            except (ValueError, TypeError):
+                pass
+            continue
+        canon[key] = c
+        order.append(c)
+    return order
+
+
 _HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'http://finance.sina.com.cn'}
 
 

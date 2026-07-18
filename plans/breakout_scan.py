@@ -24,7 +24,7 @@ from datetime import datetime
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
-from collectors.concept import concept_rank_sina, fetch_concept_stocks_sina
+from collectors.concept import concept_rank_sina, fetch_concept_stocks_sina, merge_duplicate_concepts
 from collectors.quote import kline, realtime
 from analysis.breakout import classify_stage, STAGE_LABELS
 
@@ -43,9 +43,11 @@ _KL_FETCH_DAYS = 6000  # 新浪单页最大 datalen, 覆盖上市至今全历史
 
 
 def _bare(symbol: str) -> str:
-    """成分股 symbol 常带 sh/sz 前缀, 而 kline/realtime 内部会再加前缀,
-    需先剥掉, 否则变成 szsh600236 之类无效代码。"""
-    return symbol[2:] if symbol[:2] in ("sh", "sz") else symbol
+    """成分股 symbol 常带 sh/sz/bj 前缀, 而 kline/realtime 内部会再加前缀,
+    需先剥掉, 否则变成 szsh600236 之类无效代码。
+    注意: 落盘缓存文件名用裸 6 位代码 (kl_920106.json), 故这里必须把 bj 也剥掉,
+    否则 bj920106 找不到 kl_920106.json → 触网重抓。"""
+    return symbol[2:] if symbol[:2] in ("sh", "sz", "bj") else symbol
 
 
 def _kl_path(symbol: str) -> str:
@@ -281,8 +283,9 @@ def run(top_concepts: int = 5, top_per_concept: int = 15,
     else:
         raw = concept_rank_sina(limit=top_concepts * 3)
         concepts = [{"name": c["name"], "bk_code": c["code"],
-                     "change_pct": c.get("change_pct", 0)} for c in raw][:top_concepts]
+                     "change_pct": c.get("change_pct", 0)} for c in raw]
 
+    concepts = merge_duplicate_concepts(concepts)[:top_concepts]
     if verbose:
         names = "、".join(c["name"] for c in concepts)
         print(f"[{date_str}] 突破扫描启动 → 热点版块: {names}")
@@ -395,11 +398,11 @@ if __name__ == "__main__":
 
     if args.symbols:
         # 直接对指定股票做形态识别 (复用 classify_stage)
-        from collectors.quote import kline as _k, realtime as _r
+        from collectors.quote import realtime as _r
         from analysis.breakout import classify_stage as _cs, STAGE_LABELS as _L
         out = []
         for sym in args.symbols:
-            kl = _k(sym, days=250)
+            kl = _kline_cached(sym, days=250)  # 优先本地落盘缓存, 零触网
             rt = _r(sym)
             r = _cs([b["close"] for b in kl], [b["high"] for b in kl],
                     [b["low"] for b in kl], [b["volume"] for b in kl], price=rt["price"])

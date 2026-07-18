@@ -1,0 +1,22 @@
+[Unit]
+Description=Stock Analysis 统一定时调度器
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 用户级服务(放在 ~/.config/systemd/user/)可删除下面这行 User=
+User=__USER__
+# 改成项目实际根目录
+WorkingDirectory=__PROJECT_DIR__
+# 若使用虚拟环境, 把 python3 换成 venv 的绝对路径, 例如:
+# ExecStart=__PROJECT_DIR__/venv/bin/python __PROJECT_DIR__/scripts/scheduler.py --daemon
+ExecStart=/usr/bin/python3 __PROJECT_DIR__/scripts/scheduler.py --daemon
+Restart=on-failure
+RestartSec=10
+# 可选: 限制资源, 避免单个任务拖垮整机
+# MemoryMax=2G
+
+[Install]
+# 用户级服务改为 default.target
+WantedBy=multi-user.target

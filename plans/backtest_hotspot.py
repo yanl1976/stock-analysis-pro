@@ -28,7 +28,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
-from collectors.concept import concept_rank_sina, fetch_concept_stocks_sina
+from collectors.concept import concept_rank_sina, fetch_concept_stocks_sina, merge_duplicate_concepts
 from plans.breakout_scan import _kline_cached, _bare
 from analysis.breakout import classify_stage, STAGE_LABELS, sma
 from plans.concept_analysis import filter_concepts
@@ -49,12 +49,28 @@ def kline_upto(kl, date):
     return [b for b in kl if b["date"] <= date]
 
 
-def price_on(kl, date):
-    """取不晚于 date 的最近收盘价 (容忍停牌/缺失)"""
+def price_on(kl, date, max_gap_days=14):
+    """取不晚于 date 的最近收盘价。
+
+    若该收盘距 date 过远(默认 > 14 天), 视为停牌过久/数据陈旧/已退市, 返回 None,
+    避免把多年前的旧收盘价当成当日价 (如 000522 数据止于2013却被当2026价使用, 见白云山案例)。
+    普通活跃股在交易日当天即有数据(差0天), 短期停牌(数日)也容忍; 仅剔除长期失联的陈旧标的。
+    """
+    best = None
     for b in reversed(kl):
         if b["date"] <= date:
-            return b["close"]
-    return None
+            best = b
+            break
+    if best is None:
+        return None
+    try:
+        gap = (datetime.strptime(date[:10], "%Y-%m-%d")
+               - datetime.strptime(best["date"][:10], "%Y-%m-%d")).days
+    except Exception:
+        return best["close"]
+    if gap > max_gap_days:
+        return None
+    return best["close"]
 
 
 def change_on(kl, date):
@@ -117,8 +133,7 @@ def _trading_days(buy_date, sell_date):
 # 磁盘持久化: 板块池/成分股列表快照变化极小, 落盘 data/concepts/ 后二次回测零触网(仅当天首次抓)。
 import json as _json
 _CONCEPT_DIR = os.path.join(BASE_DIR, "data", "concepts")
-_BOARD_POOL_PATH = os.path.join(_CONCEPT_DIR, "board_pool.json")
-_board_pool_cache = None
+_board_pool_cache = {}
 _board_stocks_cache = {}
 _NET_CONCEPT_HITS = 0  # 板块/成分股实际触网次数 (验证缓存复用)
 
@@ -143,30 +158,63 @@ def _concept_fresh(path, fresh_days=1):
         return False
 
 
-def get_board_pool(pool_size=120, heat_per=8, verbose=True):
-    """取新浪全量概念板块 (过滤风格/地域/市值类) 作为板块池, 进程内+磁盘双缓存。"""
-    global _board_pool_cache
-    if _board_pool_cache is not None:
-        return _board_pool_cache
-    # 磁盘命中: 直接复用, 零触网
-    if _concept_fresh(_BOARD_POOL_PATH, fresh_days=1):
+_board_pool_live = None   # 进程内单次实时抓取结果 (新浪概念榜仅实时、无历史日期参数)
+
+
+def get_board_pool(buy_date=None, pool_size=120, heat_per=8, verbose=True, force=False):
+    """取板块池 (新浪全量概念板块过滤风格/地域/市值类), 按买入日快照缓存。
+
+    ⚠️ 关键修复 (回测可复现性):
+    新浪概念榜接口 (concept_rank_sina) 只返回【运行当天】的实时榜单, 无任何历史日期参数。
+    旧实现用 '1天内' 的 board_pool.json 缓存且不区分买入日 → 同一回测在不同天跑会取到
+    完全不同的热点板块/成分股 → 候选 universe 漂移 → 胜率剧烈波动 (即用户遇到的'不稳定')。
+
+    现改为: 以买入日为 key 落盘 board_pool_{buy_date}.json 并长期有效(365天),
+    同一买入日的回测无论何时重跑都用同一份 universe。首次为该买入日抓取时取运行日实时榜
+    并永久快照; 之后零触网复用。--force-boards 可强制刷新。
+
+    注意: 因数据源无历史, 快照内容实为'首次抓取日'的实时榜, 故应在买入日当天/附近首跑
+    才能拿到该日真实热点; 历史买入日的真实热点已不可回溯 (属数据源限制, 非代码bug)。
+    """
+    global _board_pool_cache, _board_pool_live
+    key = buy_date or datetime.now().strftime("%Y-%m-%d")
+    if (not force) and key in _board_pool_cache:
+        return _board_pool_cache[key]
+    path = os.path.join(_CONCEPT_DIR, f"board_pool_{key}.json")
+    if not force and _concept_fresh(path, fresh_days=365):
         try:
-            with open(_BOARD_POOL_PATH, "r") as f:
-                _board_pool_cache = _json.load(f)["pool"]
-            return _board_pool_cache
+            with open(path, "r") as f:
+                _board_pool_cache[key] = _json.load(f)["pool"]
+            if verbose:
+                print(f"  ✓ 板块池快照命中(买入日 {key}, 零触网)")
+            return _board_pool_cache[key]
         except Exception:
             pass
-    raw = concept_rank_sina(limit=400)
-    pool = filter_concepts([{
-        "name": c["name"], "bk_code": c["code"],
-        "change_pct": c.get("change_pct", 0),
-    } for c in raw])[:pool_size]
-    _board_pool_cache = pool
-    # 落盘
+    # 实时抓取 (进程内仅一次, 任意买入日首次均取同一份实时榜)
+    if _board_pool_live is None or force:
+        raw = concept_rank_sina(limit=400)
+        _board_pool_live = filter_concepts([{
+            "name": c["name"], "bk_code": c["code"],
+            "change_pct": c.get("change_pct", 0),
+        } for c in raw])
+        # 合并语义重复主题 (风电/风能、光伏/太阳能、锂电池/锂电…), 避免近义板块占掉多个热点位
+        _board_pool_live = merge_duplicate_concepts(
+            _board_pool_live, name_key="name", code_key="bk_code",
+            amount_key="change_pct")
+    pool = _board_pool_live[:pool_size]
+    _board_pool_cache[key] = pool
+    # 落盘 (按买入日长期快照)
     os.makedirs(_CONCEPT_DIR, exist_ok=True)
     try:
-        with open(_BOARD_POOL_PATH, "w") as f:
-            _json.dump({"fetched_at": time.strftime("%Y-%m-%d %H:%M:%S"), "pool": pool}, f)
+        with open(path, "w") as f:
+            _json.dump({
+                "buy_date": key,
+                "fetched_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "note": "新浪概念榜仅实时, 此为首次抓取日实时榜快照, 作为该买入日固定universe",
+                "pool": pool,
+            }, f)
+        if verbose:
+            print(f"  ✓ 板块池快照已存(买入日 {key}, 取运行日实时榜, 长期有效)")
     except Exception:
         pass
     return pool
@@ -232,9 +280,10 @@ def restore_hotspots_on(buy_date, board_pool, heat_per=8, verbose=True):
     return ranked
 
 
-def restore_hotspots(buy_date, pool_size=120, heat_per=8, verbose=True):
+def restore_hotspots(buy_date, pool_size=120, heat_per=8, verbose=True, force=False):
     """还原 buy_date 当天热点板块 (成分股历史涨幅反推)。单点回测入口。"""
-    board_pool = get_board_pool(pool_size=pool_size, heat_per=heat_per, verbose=verbose)
+    board_pool = get_board_pool(buy_date=buy_date, pool_size=pool_size,
+                                heat_per=heat_per, verbose=verbose, force=force)
     return restore_hotspots_on(buy_date, board_pool, heat_per=heat_per, verbose=verbose)
 
 
@@ -430,6 +479,30 @@ def settle_fast(picks):
     return picks
 
 
+# ───────────────── 陈旧/退市标的黑名单 ─────────────────
+# data/stale_symbols.txt: 最后交易日距数据快照日>365天的退市/更名老股 (落盘合法但已不交易)。
+# build_pool 显式跳过并打日志, 与 price_on 的 gap 校验(>14天→None)形成双保险。
+_STALE_SYMBOLS_CACHE = None
+
+def _stale_symbols():
+    """加载陈旧标的黑名单 (懒加载+缓存), 返回 set of 6位代码。"""
+    global _STALE_SYMBOLS_CACHE
+    if _STALE_SYMBOLS_CACHE is not None:
+        return _STALE_SYMBOLS_CACHE
+    path = os.path.join(DATA_DIR, "stale_symbols.txt")
+    s = set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    s.add(line.split()[0])
+    except FileNotFoundError:
+        pass
+    _STALE_SYMBOLS_CACHE = s
+    return s
+
+
 # ───────────────── 候选池 + 多策略框架 ─────────────────
 def build_pool(buy_date, hotspots, top_n, per, verbose=True):
     """构建 buy_date 视角的完整候选池 (所有热点成分股, 已 classify_stage + 评级,
@@ -445,6 +518,10 @@ def build_pool(buy_date, hotspots, top_n, per, verbose=True):
             if _is_garbage(s.get("name", "")):
                 continue
             sym = _bare(s["symbol"])
+            if sym in _stale_symbols():
+                if verbose:
+                    print(f"    ⏭ 跳过陈旧/退市标的(黑名单): {sym} {s.get('name','')}")
+                continue
             if sym in seen:
                 for c in pool:
                     if c["symbol"] == sym and name not in c["concepts"]:
@@ -689,6 +766,98 @@ def run_all(buy_date, sell_date, pool, benchmark,
     return results
 
 
+def trade_dynamic(pool, buy_date, sell_date, runup_pct=40, stop_pct=0.09,
+                  tp_pct=None, trailing_pct=0.10, verbose=True):
+    """逐日信号驱动动态交易回测 (与 run_all/settle 的'买入持有+纪律'本质不同)。
+
+    每只股票周一收盘买入后, 在持有期间每个交易日收盘重新评估形态/均线,
+    出现以下任一信号即当日收盘卖出:
+      · 硬止损:   价格 ≤ 买入止损价 (风控, 所有策略通用)
+      · 止盈:     价格 ≥ 买入目标价 (锁利)
+      · 移动止损: 自区间峰值回撤 ≥ trailing_pct (让利润奔跑)
+      · 趋势破坏: 买入时均线多头排列(ma_bull), 当日转为非多头 → 离场
+      · 形态转弱: 当日形态 stage == 'falling' (下跌趋势)
+    若持有至卖点(sell_date)收盘仍无卖出信号, 则持有到期 (测试期末结算, 非强制清仓)。
+    这体现'按策略信号执行买卖', 而非固定死拿到卖点。
+    """
+    kl0 = _kl("000001")
+    tds = [b["date"][:10] for b in kl0]
+    seg_days = [d for d in tds if buy_date < d <= sell_date]
+    benchmark = get_benchmark(buy_date, sell_date)
+    results = []
+    for name, fn in STRATEGIES:
+        picks = [dict(c) for c in fn(pool, runup_pct=runup_pct, buy_date=buy_date)]
+        trades = []
+        for c in picks:
+            _apply_plan(c, stop_pct, tp_pct, trailing_pct)
+            sym = c["symbol"]
+            kl = c.get("kl")
+            if kl is None:
+                try:
+                    kl = _kl(sym)
+                except Exception:
+                    continue
+            buy_price = c["buy_price"]
+            stop = c["stop_loss"]
+            tp = c["take_profit"]
+            trail = c.get("trailing_pct")
+            ma_bull_buy = c["details"].get("ma_bull")
+            peak = buy_price
+            exit_price = None
+            exit_date = None
+            reason = None
+            for d in seg_days:
+                kl_u = kline_upto(kl, d)
+                if len(kl_u) < 40:
+                    continue
+                price = price_on(kl, d)
+                if price is None:
+                    continue
+                res = classify_stage([b["close"] for b in kl_u],
+                                     [b["high"] for b in kl_u],
+                                     [b["low"] for b in kl_u],
+                                     [b["volume"] for b in kl_u],
+                                     price=price)
+                det = res["details"]
+                if stop is not None and price <= stop:
+                    exit_price, exit_date, reason = stop, d, "止损"
+                    break
+                if tp is not None and price >= tp:
+                    exit_price, exit_date, reason = tp, d, "止盈"
+                    break
+                if trail is not None:
+                    if price > peak:
+                        peak = price
+                    if price <= peak * (1 - trail):
+                        exit_price, exit_date, reason = round(peak * (1 - trail), 2), d, "移动止损"
+                        break
+                if ma_bull_buy and det.get("ma_bull") is False:
+                    exit_price, exit_date, reason = price, d, "趋势破坏"
+                    break
+                if res["stage"] == "falling":
+                    exit_price, exit_date, reason = price, d, "形态转弱"
+                    break
+            if exit_price is None:
+                exit_price = price_on(kl, sell_date)
+                exit_date = sell_date
+                reason = "持有到期"
+            ps = price_on(kl, sell_date)
+            hold_return = round((ps - buy_price) / buy_price * 100, 2) if (buy_price and ps) else None
+            ret = round((exit_price - buy_price) / buy_price * 100, 2) if (buy_price and exit_price) else None
+            trades.append({
+                "symbol": sym, "name": c.get("name") or sym,
+                "stage": c["stage"], "score": c["score"], "rating": c["rating"],
+                "concepts": c.get("concepts", []), "win_rate": c["win_rate"],
+                "prior_runup": c.get("prior_runup"),
+                "buy_price": round(buy_price, 2),
+                "exit_price": round(exit_price, 2) if exit_price else None,
+                "exit_date": exit_date, "exit_reason": reason,
+                "return_pct": ret, "hold_return": hold_return,
+            })
+        results.append((name, trades, _stats(trades, benchmark)))
+    return results, seg_days
+
+
 def _pick_best(results, min_n=5):
     """按胜率选最优 (样本≥min_n; 平手比平均收益); 样本都不足则取样本最多者"""
     cand = [(n, p, s) for n, p, s in results if s["n"] >= min_n]
@@ -759,7 +928,7 @@ def _wf_sell_date(tds, buy_date, hold_days):
 def walk_forward(start, end, hold_days=30, step_days=30,
                  concepts=8, per=15, pool=120, heat_per=8,
                  runup_pct=40, stop_pct=0.09, tp_pct=None, trailing_pct=None,
-                 min_n=5, verbose=True):
+                 min_n=5, verbose=True, force=False):
     """多时点滚动回测: 在 [start,end] 内按 step_days 间隔取多个买点,
     每点持有 hold_days 交易日结算; 各策略跨所有买点聚合, 大幅提升样本量并消单点噪声。
 
@@ -777,7 +946,8 @@ def walk_forward(start, end, hold_days=30, step_days=30,
     if verbose:
         print(f"    walk-forward: {len(buy_dates)} 个买点 "
               f"({buy_dates[0]}→{buy_dates[-1]}, 间隔~{step_days}天, 持有~{hold_days}天)")
-    board_pool = get_board_pool(pool_size=pool, heat_per=heat_per, verbose=verbose)
+    board_pool = get_board_pool(buy_date=buy_dates[0], pool_size=pool,
+                                heat_per=heat_per, verbose=verbose, force=force)
     agg = {name: [] for name, _ in STRATEGIES}
     window_picks = {name: [] for name, _ in STRATEGIES}
     window_summ = []
@@ -971,7 +1141,8 @@ def build_walkforward_report(start, end, hold_days, step_days, concepts,
 def walk_forward_sweep(start, end, hold_list=(20, 35, 50), step_days=20,
                         runup_list=(30, 40, 50), stop_list=(0.07, 0.10, 0.13),
                         tp_list=(0.12, 0.16, 0.20), trailing_list=(None, 0.12, 0.18),
-                        concepts=8, per=15, pool=120, heat_per=8, min_n=30, verbose=True):
+                        concepts=8, per=15, pool=120, heat_per=8, min_n=30, verbose=True,
+                        force=False):
     """参数网格 walk-forward 扫描: 在 [start,end] 多买点 × 多持有期下,
     遍历 (前期阈值 × 止损% × 止盈% × 移动止损%) 全组合, 各策略跨买点聚合。
 
@@ -993,7 +1164,8 @@ def walk_forward_sweep(start, end, hold_list=(20, 35, 50), step_days=20,
     if verbose:
         print(f"    sweep: {len(buy_dates)} 买点, 持有{hold_list}, 间隔~{step_days}天, K线回看{_KLINE_DAYS}天")
 
-    board_pool = get_board_pool(pool_size=pool, heat_per=heat_per, verbose=verbose)
+    board_pool = get_board_pool(buy_date=buy_dates[0], pool_size=pool,
+                                heat_per=heat_per, verbose=verbose, force=force)
 
     # 预构建: 每买点 pool + 每持有档位的 (卖点, 基准, 各股K线段)
     bd_data = []
@@ -1192,6 +1364,82 @@ def build_sweep_report(results, meta, ranked, best_per):
     return "\n".join(L)
 
 
+def build_trade_report(buy_date, sell_date, hotspots, top_n, results, best, seg_days):
+    lines = []
+    lines.append(f"{'='*64}")
+    lines.append(f"  🔄 逐日信号驱动动态交易回测 (按策略执行买卖)")
+    lines.append(f"  (买 {buy_date} 收盘 → 卖 {sell_date} 收盘)")
+    lines.append(f"{'='*64}")
+    bench = get_benchmark(buy_date, sell_date)
+    bench_str = f"{bench:+.2f}%" if bench is not None else "无数据"
+    lines.append(f"\n【一、回测设定】")
+    lines.append(f"  周一 {buy_date} 收盘: 按策略选股买入 (每只一笔, 等权)")
+    lines.append(f"  持有期间交易日: {', '.join(seg_days)} — 每个交易日收盘重估形态/均线")
+    lines.append(f"  卖出信号: 硬止损 / 止盈 / 移动止损(10%) / 趋势破坏(ma_bull反转) / 形态转弱(falling)")
+    lines.append(f"  卖点 {sell_date} 收盘: 仍持仓者持有到期 (测试期末, 非强制清仓)")
+    lines.append(f"  同期上证: {bench_str} (基准)")
+
+    lines.append(f"\n【二、各策略动态交易对比 (按胜率排序)】")
+    lines.append(f"  {'策略':<22}{'样本':>5}{'胜率':>8}{'均收益':>9}{'超额':>9}{'死拿':>9}")
+    for name, picks, st in sorted(results, key=lambda x: (-x[2]["win"], -(x[2]["avg"] or -999))):
+        avg = f"{st['avg']:+.2f}%" if st["avg"] is not None else "—"
+        ex = f"{st['excess']:+.2f}%" if st["excess"] is not None else "—"
+        ha = f"{st['hold_avg']:+.2f}%" if st["hold_avg"] is not None else "—"
+        mark = " ★" if name == best[0] else ""
+        lines.append(f"  {name:<20}{st['n']:>5}{st['win']:>7.0f}%{avg:>9}{ex:>9}{ha:>9}{mark}")
+
+    lines.append(f"\n【三、最优策略: {best[0]}】")
+    bs = best[2]
+    avg_s = f"{bs['avg']:+.2f}%" if bs["avg"] is not None else "—"
+    ex_s = f"{bs['excess']:+.2f}%" if bs["excess"] is not None else "—"
+    ha_s = f"{bs['hold_avg']:+.2f}%" if bs["hold_avg"] is not None else "—"
+    lines.append(f"  样本 {bs['n']} 只 | 胜率 {bs['win']:.0f}% | 动态均收益 {avg_s} | 超额 {ex_s} | 对照死拿 {ha_s}")
+
+    bpicks = best[1]
+    lines.append(f"\n【四、最优策略逐笔交易明细 (买卖 + 退出信号, 前 20)】")
+    lines.append(f"  {'名称(代码)':<18}{'买价':>9}{'卖日':>11}{'卖价':>9}{'收益':>9}{'退出':>8}{'形态':>10}")
+    shown = 0
+    for p in sorted(bpicks, key=lambda x: -(x["return_pct"] or -999)):
+        if p.get("return_pct") is None:
+            continue
+        nm = f"{p['name']}({p['symbol']})"
+        if len(nm) > 16:
+            nm = nm[:15] + "…"
+        lines.append(f"  {nm:<18}{p['buy_price']:>9.2f}{p['exit_date']:>11}"
+                     f"{p['exit_price']:>9.2f}{p['return_pct']:>+8.2f}%{p['exit_reason']:>8}"
+                     f"{STAGE_LABELS.get(p['stage'], ''):>10}")
+        shown += 1
+        if shown >= 20:
+            break
+
+    from collections import Counter
+    valid = [p for p in bpicks if p.get("return_pct") is not None]
+    lines.append(f"\n【五、退出信号分布 (最优策略, 看'按策略卖'占比)】")
+    rc = Counter(p["exit_reason"] for p in valid)
+    for k in ("止盈", "移动止损", "止损", "趋势破坏", "形态转弱", "持有到期"):
+        if rc.get(k):
+            grp = [p for p in valid if p["exit_reason"] == k]
+            ga = sum(p["return_pct"] for p in grp) / len(grp)
+            lines.append(f"  · {k}: {rc[k]}只  均收益 {ga:+.2f}%")
+    early = [p for p in valid if p["exit_reason"] in ("止盈", "移动止损", "止损", "趋势破坏", "形态转弱")]
+    if valid:
+        lines.append(f"  → 周五前按信号卖出 {len(early)}/{len(valid)} 只 "
+                     f"({len(early)/len(valid)*100:.0f}%), 体现'按策略执行买卖'而非死拿到周五")
+
+    lines.append(f"\n【六、动态交易 vs 买入持有(死拿到期)】")
+    if valid:
+        dyn_avg = sum(p["return_pct"] for p in valid) / len(valid)
+        hv = [p for p in valid if p.get("hold_return") is not None]
+        havg = sum(p["hold_return"] for p in hv) / len(hv) if hv else None
+        if havg is not None:
+            lines.append(f"  动态(按信号买卖)均收益 {dyn_avg:+.2f}% vs 死拿到期 {havg:+.2f}% "
+                         f"→ 动态{'优于' if dyn_avg > havg else '劣于'}死拿 {dyn_avg-havg:+.2f}pct")
+        if bench is not None:
+            lines.append(f"  动态超额 vs 上证: {dyn_avg-bench:+.2f}%")
+    lines.append(f"\n{'='*64}")
+    return "\n".join(lines)
+
+
 def build_compare_report(buy_date, sell_date, hotspots, top_n, results, best, opt, benchmark):
     lines = []
     lines.append(f"{'='*64}")
@@ -1383,8 +1631,9 @@ def main():
     ap.add_argument("--stop-pct", type=float, default=0.09, help="纪律止损比例 (默认9%)")
     ap.add_argument("--tp-pct", type=float, default=None, help="纪律止盈比例 (默认: 突破18%/其他12%)")
     ap.add_argument("--min-n", type=int, default=5, help="选优最小样本数")
-    ap.add_argument("--mode", choices=["compare", "single"], default="compare",
-                    help="compare=多策略对比+优化(默认); single=原单策略详细报告")
+    ap.add_argument("--mode", choices=["compare", "single", "trade"], default="compare",
+                    help="compare=多策略对比+优化(默认); single=原单策略详细报告; "
+                         "trade=逐日信号驱动动态交易(按策略信号买卖)")
     ap.add_argument("--walk-forward", action="store_true",
                     help="walk-forward 多时点回测 (多买点聚合, 大幅增样本, S0–S7 同步)")
     ap.add_argument("--wf-start", default=None, help="walk-forward 起始日 (默认=--buy)")
@@ -1396,6 +1645,8 @@ def main():
     ap.add_argument("--kline-days", type=int, default=800, help="K线回看天数 (拉长周期时调大以覆盖买点之前历史)")
     ap.add_argument("--no-score-filter", action="store_true", help="(single模式) 不过滤低分候选")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--force-boards", action="store_true",
+                    help="强制刷新板块池快照 (默认复用按买入日缓存的 board_pool_{buy_date}.json)")
     args = ap.parse_args()
 
     global _KLINE_DAYS
@@ -1411,7 +1662,7 @@ def main():
             wf_start, wf_end, hold_days=args.hold_days, step_days=args.step_days,
             concepts=args.concepts, per=args.per, pool=args.pool, heat_per=args.heat_per,
             runup_pct=args.runup_pct, stop_pct=args.stop_pct, tp_pct=args.tp_pct,
-            min_n=args.min_n, verbose=True)
+            min_n=args.min_n, verbose=True, force=args.force_boards)
         if not agg_results:
             print("  ⚠ 无有效买点/数据, 退出")
             return
@@ -1440,7 +1691,7 @@ def main():
             runup_list=(30, 40, 50), stop_list=(0.07, 0.10, 0.13),
             tp_list=(0.12, 0.16, 0.20), trailing_list=(None, 0.12, 0.18),
             concepts=args.concepts, per=args.per, pool=args.pool, heat_per=args.heat_per,
-            min_n=args.min_n, verbose=True)
+            min_n=args.min_n, verbose=True, force=args.force_boards)
         if not results:
             print("  ⚠ 无有效结果 (周期/K线不足或样本为0), 退出")
             return
@@ -1458,7 +1709,8 @@ def main():
         return
 
     print("  ▶ 步骤1: 还原热点板块 (成分股历史涨幅反推)...")
-    hotspots = restore_hotspots(args.buy, pool_size=args.pool, heat_per=args.heat_per)
+    hotspots = restore_hotspots(args.buy, pool_size=args.pool, heat_per=args.heat_per,
+                                force=args.force_boards)
 
     print(f"  ▶ 步骤2: 构建候选池 (Top {args.concepts} 热点板块成分股, 形态识别)...")
     pool = build_pool(args.buy, hotspots, args.concepts, args.per)
@@ -1481,6 +1733,25 @@ def main():
             with open(out, "w", encoding="utf-8") as f:
                 f.write(report)
             print(f"\n  📄 报告已保存: {out}")
+        except Exception:
+            pass
+        return
+
+    if args.mode == "trade":
+        print(f"  ▶ 动态交易: 周一 {args.buy} 买入, 持有期间按策略信号卖出, {args.sell} 持有到期(非强制清仓)...")
+        results, seg_days = trade_dynamic(pool, args.buy, args.sell,
+            runup_pct=args.runup_pct, stop_pct=args.stop_pct, tp_pct=args.tp_pct,
+            trailing_pct=0.10)
+        best = _pick_best(results, min_n=args.min_n)
+        print(f"    最优策略(按胜率): {best[0]}  胜率 {best[2]['win']:.0f}%  样本 {best[2]['n']}")
+        report = build_trade_report(args.buy, args.sell, hotspots, args.concepts,
+                                    results, best, seg_days)
+        print("\n" + report)
+        out = os.path.join(DATA_DIR, f"backtest_trade_{args.buy}_{args.sell}.md")
+        try:
+            with open(out, "w", encoding="utf-8") as f:
+                f.write(report)
+            print(f"\n  📄 动态交易报告已保存: {out}")
         except Exception:
             pass
         return

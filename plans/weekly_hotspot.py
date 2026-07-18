@@ -3,12 +3,12 @@
 
 流程:
   1. 分析本周热点版块 (概念板块实时排名, 过滤风格/地域/市值类)
-  2. 每个热点版块提取 2 只成分股 (按涨幅取前 2) 加入自选股 (清空旧自选, 重建为热点驱动)
+  2. 自选股 = 步骤3策略选出的候选池 (热点板块内按 classify_stage 形态识别, 不再取"涨幅前2")
   3. 按新选股逻辑 (analysis/breakout.classify_stage 形态识别) 在热点版块内选股
   4. 生成报告并推送到企业微信智能机器人 (aibot 通道, 与用户沟通的唯一通道)
 
 用法:
-  python plans/weekly_hotspot.py                       # 默认 8 个版块, 每版块 2 只入自选, 突破扫描每版块 15 只
+  python plans/weekly_hotspot.py                       # 默认 8 个版块, 自选股=策略候选池, 突破扫描每版块 15 只
   python plans/weekly_hotspot.py --concepts 10 --per 20
   python plans/weekly_hotspot.py --no-push              # 只生成报告不推送
   python plans/weekly_hotspot.py --json                 # 输出 JSON
@@ -37,7 +37,7 @@ sys.path.insert(0, BASE_DIR)
 DATA_DIR = os.path.join(BASE_DIR, "data")
 WATCHLIST_PATH = os.path.join(DATA_DIR, "watchlist.json")
 
-from collectors.concept import concept_rank_sina, fetch_concept_stocks_sina
+from collectors.concept import concept_rank_sina, merge_duplicate_concepts
 from plans.concept_analysis import filter_concepts
 from plans.breakout_scan import run as run_breakthrough, format_report as fmt_breakthrough, _kline_cached
 from core.cli import save_watchlist
@@ -320,49 +320,44 @@ def get_hotspots(top_n: int = 8) -> list:
         "leader_code": c.get("leader_code", ""),
         "leader_pct": c.get("leader_pct", 0),
     } for c in raw]
-    return filter_concepts(mapped)[:top_n]
+    return merge_duplicate_concepts(filter_concepts(mapped))[:top_n]
 
 
-def build_watchlist(hotspots: list, per_sector: int = 2, verbose: bool = True) -> list:
-    """每个热点版块取涨幅前 per_sector 只成分股, 重建自选股 (清空旧列表)。
+def build_watchlist_from_candidates(breakthrough: dict, verbose: bool = True) -> list:
+    """自选股 = 最终推荐的买 list (breakthrough["final"])。
 
-    返回: [{code, name, pct, concept}, ...] (去重后)
+    不再取"涨幅前2" (那会把已涨停的票塞进监控池, 与策略"不追已大涨"相悖),
+    也不再跨板块去重丢弃 (跨板块共振=双重确认, 是最强信号, 应保留其全部所属板块)。
+    final 是经大盘三状态蒸馏 (apply_regime_strategy) 后的最终买 list:
+      多头→全量候选; 震荡→薄边降仓; 空头→空 list。
+    若 final 缺失则回退到 candidates (形态识别候选池), 不回退到更早的"涨幅前2"。
+    enrich_candidates 已对候选按 symbol 合并概念 (concepts 字段含全部所属板块),
+    final 元素同样带 concepts 字段。
+
+    返回: [{code, name, pct, concept}, ...] (concept 为"板块1、板块2"合并串)
     """
-    picked = []          # 用于报告
-    seen = set()         # 去重 (按裸码)
-    wl_codes = []        # 写入 watchlist.json 的裸码列表
-
-    for c in hotspots:
-        try:
-            stocks = fetch_concept_stocks_sina(c["code"], name=c["name"], limit=100)
-        except Exception as e:
-            if verbose:
-                print(f"    ⚠️ {c['name']} 成分股获取失败: {e}")
+    final = breakthrough.get("final")
+    if not final:
+        final = breakthrough.get("candidates", []) or []
+    seen = set()
+    picks = []
+    for c in final:
+        sym = _bare(c.get("symbol", ""))
+        if not sym or sym in seen:
             continue
-        # 按涨幅降序取前 N
-        try:
-            stocks.sort(key=lambda s: -float(s.get("change_pct", 0) or 0))
-        except (ValueError, TypeError):
-            pass
-        for s in stocks[:per_sector]:
-            code = _bare(s.get("symbol", ""))
-            if not code or code in seen:
-                continue
-            seen.add(code)
-            wl_codes.append(code)
-            picked.append({
-                "code": code,
-                "name": s.get("name", code),
-                "pct": round(float(s.get("change_pct", 0) or 0), 2),
-                "concept": c["name"],
-            })
-        time.sleep(0.3)
-
-    # 重建自选股 (清空旧列表, 仅保留热点驱动)
+        seen.add(sym)
+        cons = c.get("concepts") or ([c.get("concept")] if c.get("concept") else [])
+        picks.append({
+            "code": sym,
+            "name": c.get("name", sym),
+            "pct": round(float(c.get("change_pct", 0) or 0), 2),
+            "concept": "、".join(cons),
+        })
+    wl_codes = [p["code"] for p in picks]
     save_watchlist(wl_codes)
     if verbose:
-        print(f"  ✓ 自选股已重建: {len(wl_codes)} 只 (来自 {len(hotspots)} 个热点版块)")
-    return picked
+        print(f"  ✓ 自选股已重建(最终推荐买 list): {len(wl_codes)} 只")
+    return picks
 
 
 def build_report(date_str: str, hotspots: list, watchlist_picks: list,
@@ -394,8 +389,8 @@ def build_report(date_str: str, hotspots: list, watchlist_picks: list,
         lead = f" 龙头:{c['leader']}({c['leader_pct']:+.1f}%)" if c.get("leader") else ""
         lines.append(f"  {i}. {c['name']} {c['change_pct']:+.2f}%  成交{amt_yi}亿{lead}")
 
-    # 二、自选股 (每版块 2 只)
-    lines.append(f"\n【二、自选股更新 (每版块取 {sum(1 for _ in range(1)) and '前2'})】")
+    # 二、自选股 (最终推荐买 list)
+    lines.append(f"\n【二、自选股更新 (最终推荐买 list · 经大盘三状态蒸馏)】")
     lines.append(f"  共 {len(watchlist_picks)} 只, 已写入 data/watchlist.json:")
     # 按版块分组展示
     by_concept = {}
@@ -483,7 +478,6 @@ def main():
     ap = argparse.ArgumentParser(description="本周热点选股流水线")
     ap.add_argument("--concepts", type=int, default=8, help="热点版块数量 (默认8)")
     ap.add_argument("--per", type=int, default=15, help="突破扫描每版块成分股数 (默认15)")
-    ap.add_argument("--watch-per", type=int, default=2, help="每版块入选自选股数 (默认2)")
     ap.add_argument("--runup-days", type=int, default=20, help="前期涨幅回看交易日数 (默认20)")
     ap.add_argument("--runup-pct", type=float, default=40, help="前期涨幅超此%则'不追'剔除 (默认40)")
     ap.add_argument("--no-push", action="store_true", help="仅生成报告, 不推送微信")
@@ -502,9 +496,7 @@ def main():
         return 1
     print(f"    热点版块 {len(hotspots)} 个: " + "、".join(c["name"] for c in hotspots), flush=True)
 
-    # 2. 建自选股 (每版块 2 只)
-    print("  ▶ 步骤2: 每个热点版块提取成分股重建自选股...", flush=True)
-    watchlist_picks = build_watchlist(hotspots, per_sector=args.watch_per)
+    # 2. 自选股改由步骤3(策略选股)后的候选池重建, 此处不再单独取"涨幅前2"
 
     # 3. 新选股逻辑筛选 (突破扫描)
     print("  ▶ 步骤3: 按新选股逻辑 (classify_stage) 在热点版块内选股...", flush=True)
@@ -517,6 +509,9 @@ def main():
     breakthrough = enrich_candidates(breakthrough,
                                      runup_days=args.runup_days,
                                      runup_pct=args.runup_pct)
+    # 2(延后). 自选股 = 策略候选池 (热点板块内按形态识别选出, 跨板块共振保留)
+    watchlist_picks = build_watchlist_from_candidates(breakthrough, verbose=True)
+
     print(f"    选入 {breakthrough.get('count', 0)} 只, "
           f"剔除前期大涨不追 {breakthrough.get('excluded_count', 0)} 只 "
           f"(前{args.runup_days}日>{args.runup_pct}%不追)", flush=True)
