@@ -15,6 +15,11 @@
   python plans/weekly_hotspot.py --runup-days 20 --runup-pct 40   # 前期大涨不追阈值(前N日涨幅>%剔除)
 
 策略微调 (与 backtest_hotspot 回测结论一致):
+  · 大盘三状态路由 (实战核心): 先判上证 MA20 vs MA60 得 多头/震荡/空头,
+    再蒸馏不同选股策略 (见 REGIME_STRATEGY / apply_regime_strategy):
+      - 多头(MA20>MA60): 顺势低吸 = 回调低吸(S5) ∪ 强趋势低波动(S6), 回测胜率76-77%
+      - 震荡(MA20≈MA60): 高胜率共振(S3), 回测胜率56%, 薄边降仓(0.6×)
+      - 空头(MA20<MA60): 空仓观望, 不出股 (回测无可靠策略, 避免买点窗口虚假信号)
   · 前期大涨不追: 截至今天前 runup_days 日累计涨幅 > runup_pct% 直接剔除推荐 (等回踩不追高)
   · 每只推荐自带纪律买卖: 买点 / 止损价 / 目标价(take_profit) / 仓位 / 卖出提示(移动止损锁利)
 """
@@ -169,12 +174,19 @@ def enrich_candidates(breakthrough, runup_days=20, runup_pct=40):
             if c.get("concept") and c["concept"] not in seen[sym]["concepts"]:
                 seen[sym]["concepts"].append(c["concept"])
             continue
+        # 取K线供蒸馏策略(strat_*)使用: 回调低吸需 ma20/价格, 与回测同源
+        try:
+            kl = _kline_cached(sym)
+        except Exception:
+            kl = None
         wr = _estimate_win_rate(c.get("stage"), c.get("signals", []))
         rating = _rating(c.get("score", 0), wr, c.get("stage"))
         buy, stop, stop_pct, position = _build_plan(c, wr, rating)
         tp, sell_hint = _sell_hint(float(c.get("price") or 0), c.get("stage"), stop)
         seen[sym] = {
             **c,
+            "kl": kl,
+            "price_b": float(c.get("price") or 0),
             "concepts": [c.get("concept")],
             "win_rate": wr,
             "rating": rating,
@@ -189,6 +201,85 @@ def enrich_candidates(breakthrough, runup_days=20, runup_pct=40):
     enriched = sorted(seen.values(), key=lambda x: -x["score"])
     return {**breakthrough, "candidates": enriched, "count": len(enriched),
             "excluded": excluded, "excluded_count": len(excluded)}
+
+
+# ───────────────── 大盘三状态 × 蒸馏策略路由 ─────────────────
+# 来自 backtest_hotspot walk-forward 蒸馏 (2024-06→2026-07, 按大盘三状态拆胜率):
+#   多头(MA20>MA60): S5 趋势回调低吸 77%/+6.96% ⊕ S6 强趋势低波动 76%/+6.52%
+#   震荡(MA20≈MA60): S3 高胜率共振 56%/+2.97% (唯一正期望, 薄边降仓)
+#   空头(MA20<MA60): 无可靠策略(最佳仅53%且样本小, 多数40-50%) → 空仓
+REGIME_NEUTRAL_BAND = 0.03  # |MA20-MA60|/MA60 <= 3% 视为纠缠(震荡)
+
+REGIME_STRATEGY = {
+    "多头": {
+        "label": "顺势低吸(回调+低波)",
+        "desc": "大盘多头排列, 顺势做多。实证: 回调低吸胜率77%/均收益+6.96%, "
+                "强趋势低波动76%/+6.52% (S5∪S6)。",
+        "position_scale": 1.0,
+    },
+    "震荡": {
+        "label": "高胜率共振",
+        "desc": "大盘纠缠震荡, 仅高胜率共振(S3)有正期望(56%/+2.97%), 边薄。降仓位、严止损。",
+        "position_scale": 0.6,
+    },
+    "空头": {
+        "label": "空仓观望",
+        "desc": "大盘空头排列, 无可靠策略(最佳仅53%且样本小, 多数40-50%)。"
+                "空仓不出股, 规避买点窗口虚假信号。",
+        "position_scale": 0.0,
+    },
+    "未知": {
+        "label": "未知(按震荡处理)",
+        "desc": "大盘数据不足, 保守按震荡处理。",
+        "position_scale": 0.6,
+    },
+}
+
+
+def market_regime():
+    """判定当前大盘(上证000001)三状态: 多头/震荡/空头。基于 MA20 vs MA60。
+
+    返回 (状态, MA20相对MA60偏离% 或 None)。与回测 _market_weak 同源口径。
+    """
+    try:
+        kl = _kline_cached("000001", days=250)
+        closes = [b["close"] for b in kl if b.get("close")]
+        if len(closes) < 60:
+            return "未知", None
+        ma20 = sum(closes[-20:]) / 20
+        ma60 = sum(closes[-60:]) / 60
+        diff = (ma20 - ma60) / ma60
+        if diff > REGIME_NEUTRAL_BAND:
+            return "多头", round(diff * 100, 2)
+        if diff < -REGIME_NEUTRAL_BAND:
+            return "空头", round(diff * 100, 2)
+        return "震荡", round(diff * 100, 2)
+    except Exception:
+        return "未知", None
+
+
+def apply_regime_strategy(candidates, regime, buy_date):
+    """按大盘状态路由到蒸馏策略, 返回最终推荐候选 (空头返回空列表=空仓)。
+
+    直接复用 backtest_hotspot 的 strat_* 函数 (与回测同源, 保证口径一致)。
+    """
+    from plans.backtest_hotspot import strat_pullback, strat_steady, strat_highwr
+    if regime == "空头":
+        return []
+    if regime == "多头":
+        # 顺势低吸: 回调低吸(S5) ∪ 强趋势低波动(S6), 去重
+        pb = [c for c in candidates if c.get("kl")]
+        picks = strat_pullback(pb, runup_pct=40, buy_date=buy_date)
+        picks += strat_steady(candidates, runup_pct=40, buy_date=buy_date)
+    else:  # 震荡 / 未知 → 高胜率共振(S3)
+        picks = strat_highwr(candidates, runup_pct=40, buy_date=buy_date)
+    seen = set()
+    out = []
+    for c in picks:
+        if c["symbol"] not in seen:
+            seen.add(c["symbol"])
+            out.append(c)
+    return out
 
 
 def _bare(symbol: str) -> str:
@@ -257,10 +348,26 @@ def build_watchlist(hotspots: list, per_sector: int = 2, verbose: bool = True) -
 
 
 def build_report(date_str: str, hotspots: list, watchlist_picks: list,
-                 breakthrough: dict) -> str:
+                 breakthrough: dict, regime: str = None) -> str:
+    regime = regime or breakthrough.get("regime", "未知")
+    rinfo = REGIME_STRATEGY.get(regime, REGIME_STRATEGY["未知"])
+    final = breakthrough.get("final", breakthrough.get("candidates", []))
+    is_bear = (regime == "空头")
+    rdiff = breakthrough.get("regime_diff")
     lines = [f"\n{'='*50}",
              f"  📊 本周热点选股报告 ({date_str})",
              f"{'='*50}"]
+
+    # 〇、大盘行情状态与策略路由
+    lines.append(f"\n【〇、大盘行情状态与策略路由】")
+    rdiff_s = f"{rdiff:+.2f}%" if isinstance(rdiff, (int, float)) else "—"
+    lines.append(f"  大盘(上证): {regime}  (MA20相对MA60 {rdiff_s})")
+    lines.append(f"  采用策略: 【{rinfo['label']}】")
+    lines.append(f"  策略说明: {rinfo['desc']}")
+    if is_bear:
+        lines.append(f"  ⚠️ 空头排列 → 本期空仓观望, 不出股 (候选池 {breakthrough.get('count',0)} 只全部放弃)")
+    else:
+        lines.append(f"  蒸馏精选: 候选池 {breakthrough.get('count',0)} 只 → 精选 {len(final)} 只")
 
     # 一、热点版块
     lines.append(f"\n【一、本周热点版块 Top {len(hotspots)}】")
@@ -280,14 +387,18 @@ def build_report(date_str: str, hotspots: list, watchlist_picks: list,
         parts = [f"{p['name']}({p['code']}) {p['pct']:+.1f}%" for p in picks]
         lines.append(f"  · {concept}: {' / '.join(parts)}")
 
-    # 三、新选股逻辑筛选 (突破扫描)
-    lines.append(f"\n【三、新选股逻辑筛选 (classify_stage 形态识别)】")
+    # 三、蒸馏策略精选
+    lines.append(f"\n【三、蒸馏策略精选 ({rinfo['label']}, 大盘{regime})】")
     if "error" in breakthrough:
         lines.append(f"  ❌ 突破扫描失败: {breakthrough['error']}")
+    elif is_bear:
+        lines.append(f"  🛑 空头排列行情 → 空仓观望, 不出股。")
+        lines.append(f"  · 理由: {rinfo['desc']}")
+        lines.append(f"  · 候选池仍有 {breakthrough.get('count',0)} 只, 但空头无可靠策略, 全部放弃。")
     else:
-        lines.append(f"  候选 {breakthrough['count']} 只 (已去重, 已剔除前期大涨不追 "
-                     f"{breakthrough.get('excluded_count', 0)} 只), 按评分降序 Top 15:")
-        for i, c in enumerate(breakthrough["candidates"][:15], 1):
+        lines.append(f"  候选池 {breakthrough.get('count',0)} 只 (已剔除前期大涨不追 "
+                     f"{breakthrough.get('excluded_count', 0)} 只) → 蒸馏精选 {len(final)} 只:")
+        for i, c in enumerate(final[:15], 1):
             sig = " | ".join(c.get("signals", [])[:3])
             wr = c.get("win_rate")
             wr_str = f" 成功率{wr*100:.0f}%" if isinstance(wr, (int, float)) else ""
@@ -311,10 +422,14 @@ def build_report(date_str: str, hotspots: list, watchlist_picks: list,
     lines.append(f"\n【四、买入建议与计划 (形态成功率 + 综合评级 + 纪律买卖)】")
     if "error" in breakthrough:
         lines.append("  (无数据)")
+    elif is_bear:
+        lines.append("  🛑 空仓观望: 本期不给出买入计划。")
+        lines.append("  · 空头排列下任何买点胜率均不足 (回测最佳仅53%且样本小), 持币等待多头信号。")
     else:
-        lines.append("  评级: 重点 > 关注 > 观察 > 暂避 | 仓位为单标的上限建议")
+        lines.append("  评级: 重点 > 关注 > 观察 > 暂避 | 仓位为单标的上限建议"
+                     + (" (震荡薄边已按0.6×降仓)" if regime == "震荡" else ""))
         lines.append("  纪律: 破止损价离场; 触目标价止盈; 盈利>8%上移止损至成本锁利")
-        for i, c in enumerate(breakthrough["candidates"][:12], 1):
+        for i, c in enumerate(final[:12], 1):
             wr = c.get("win_rate")
             wr_str = f"{wr*100:.0f}%" if isinstance(wr, (int, float)) else "—"
             lines.append(
@@ -377,8 +492,28 @@ def main():
           f"剔除前期大涨不追 {breakthrough.get('excluded_count', 0)} 只 "
           f"(前{args.runup_days}日>{args.runup_pct}%不追)", flush=True)
 
+    # 3c. 大盘三状态判定 + 蒸馏策略路由 (实战核心: 不同行情用不同选股策略)
+    regime, regime_diff = market_regime()
+    rinfo = REGIME_STRATEGY.get(regime, REGIME_STRATEGY["未知"])
+    final = apply_regime_strategy(breakthrough.get("candidates", []), regime, date_str)
+    scale = rinfo["position_scale"]
+    if scale and scale != 1.0:
+        for c in final:
+            try:
+                c["position"] = max(1, round((c.get("position") or 5) * scale))
+            except Exception:
+                pass
+    breakthrough["regime"] = regime
+    breakthrough["regime_diff"] = regime_diff
+    breakthrough["strategy_label"] = rinfo["label"]
+    breakthrough["strategy_desc"] = rinfo["desc"]
+    breakthrough["final"] = final
+    breakthrough["final_count"] = len(final)
+    print(f"    大盘状态: {regime} (MA20-MA60 {regime_diff:+.2f}%) → 策略[{rinfo['label']}] "
+          f"精选 {len(final)} 只 (候选池 {breakthrough.get('count',0)} 只)", flush=True)
+
     # 4. 报告
-    report = build_report(date_str, hotspots, watchlist_picks, breakthrough)
+    report = build_report(date_str, hotspots, watchlist_picks, breakthrough, regime=regime)
 
     # 4b. HTML 报告 (统一机制: core/html_renderer.render + HTML_REPORT:<path> 约定)
     if args.html:

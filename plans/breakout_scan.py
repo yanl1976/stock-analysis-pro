@@ -41,7 +41,7 @@ def _bare(symbol: str) -> str:
 
 def _kline_cached(symbol: str, days: int = 250):
     os.makedirs(CACHE_DIR, exist_ok=True)
-    key = f"kl_{symbol}"
+    key = f"kl_{symbol}_{days}"
     path = os.path.join(CACHE_DIR, f"{key}.json")
     if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < CACHE_TTL:
         try:

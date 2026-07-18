@@ -6,12 +6,34 @@
 {% macro fmt_pct(v) %}{% if v is not none %}{{ '%+.2f'|format(v) }}%{% else %}--{% endif %}{% endmacro %}
 
 {% set candidates = (data.breakthrough.get('candidates', []) if data.breakthrough and 'candidates' in data.breakthrough else []) %}
+{% set final = (data.breakthrough.get('final', candidates) if data.breakthrough else candidates) %}
+{% set regime = (data.breakthrough.get('regime', '未知') if data.breakthrough else '未知') %}
+{% set is_bear = (regime == '空头') %}
+{% set rinfo = {'多头':{'label':'顺势低吸(回调+低波)','color':'var(--green)'},'震荡':{'label':'高胜率共振','color':'var(--yellow)'},'空头':{'label':'空仓观望','color':'var(--red)'},'未知':{'label':'未知(按震荡)','color':'var(--text-muted)'}}.get(regime, {'label':'未知','color':'var(--text-muted)'}) %}
 {% set stage_cls = {'about_to_launch':'var(--green)','breakout':'var(--accent)','running':'var(--yellow)','platform':'var(--blue)','trending':'var(--text-muted)','falling':'var(--red)','unknown':'var(--text-muted)'} %}
 {% set stage_label = {'platform':'🟦 平台整理','about_to_launch':'🟢 即将启动','breakout':'🚀 突破启动','running':'🔥 已主升(慎追)','falling':'📉 下跌','trending':'📈 趋势中','unknown':'❓ 未知'} %}
 
 <div class="header">
   <h1>📊 本周热点选股报告</h1>
   <div class="subtitle">{{ data.date }} · 热点 {{ data.hotspots|length }} 板块 · 自选 {{ data.watchlist|length }} 只 · 突破候选 {{ candidates|length }} 只</div>
+</div>
+
+{# 〇、大盘行情状态与策略路由 #}
+<div class="section">
+  <div class="section-title"><span class="icon">🌐</span> 大盘行情状态与策略路由</div>
+  <div class="card" style="border-left:3px solid {{ rinfo.color }};">
+    <div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px;">
+      <span style="font-size:14px;font-weight:700;">大盘(上证): <b style="color:{{ rinfo.color }};">{{ regime }}</b></span>
+      <span style="font-size:12px;color:var(--text-muted);">MA20相对MA60 {{ '%+.2f'|format(data.breakthrough.regime_diff) if data.breakthrough and data.breakthrough.regime_diff is defined and data.breakthrough.regime_diff is not none else '—' }}%</span>
+      <span style="font-size:13px;font-weight:700;padding:2px 10px;border-radius:10px;background:{{ rinfo.color }}22;color:{{ rinfo.color }};">采用策略: {{ rinfo.label }}</span>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);margin-top:6px;">{{ data.breakthrough.strategy_desc if data.breakthrough and data.breakthrough.strategy_desc else '' }}</div>
+    {% if is_bear %}
+    <div style="font-size:13px;color:var(--red);font-weight:700;margin-top:6px;">🛑 空头排列 → 空仓观望, 不出股 (候选池 {{ candidates|length }} 只全部放弃)</div>
+    {% else %}
+    <div style="font-size:12px;color:var(--text-muted);margin-top:6px;">蒸馏精选: 候选池 {{ candidates|length }} 只 → 精选 <b>{{ final|length }}</b> 只</div>
+    {% endif %}
+  </div>
 </div>
 
 {# 一、热点版块 #}
@@ -40,15 +62,17 @@
   {% endfor %}
 </div>
 
-{# 三、新选股逻辑筛选 (突破候选) #}
+{# 三、蒸馏策略精选 #}
 <div class="section">
-  <div class="section-title"><span class="icon">🎯</span> 新选股逻辑筛选 (classify_stage 形态识别)</div>
+  <div class="section-title"><span class="icon">🎯</span> 蒸馏策略精选 ({{ rinfo.label }}, 大盘{{ regime }})</div>
   {% if data.breakthrough and data.breakthrough.get('error') %}
     <div style="padding:12px;color:var(--red);">突破扫描失败: {{ data.breakthrough.error }}</div>
-  {% elif not candidates %}
-    <div style="padding:12px;color:var(--text-muted);">未筛选出候选</div>
+  {% elif is_bear %}
+    <div style="padding:12px;color:var(--red);">🛑 空头排列行情 → 空仓观望, 不出股。候选池仍有 {{ candidates|length }} 只, 但空头无可靠策略, 全部放弃。</div>
+  {% elif not final %}
+    <div style="padding:12px;color:var(--text-muted);">蒸馏精选无候选 (候选池 {{ candidates|length }} 只均未通过当前行情策略)</div>
   {% endif %}
-  {% for c in candidates %}
+  {% for c in final %}
   {% set d = c.get('details', {}) or {} %}
   {% set sc = stage_cls.get(c.stage, 'var(--text-muted)') %}
   <div class="card" style="margin-bottom:10px;">
@@ -81,9 +105,12 @@
 {# 四、买入建议与计划 #}
 <div class="section">
   <div class="section-title"><span class="icon">💡</span> 买入建议与计划 (形态成功率 + 综合评级 + 纪律买卖)</div>
-  <div style="font-size:12px;color:var(--text-muted);padding:0 12px 8px;">评级: 重点 &gt; 关注 &gt; 观察 &gt; 暂避 · 仓位为单标的上限建议 · 破止损离场 / 触目标止盈 / 盈利&gt;8%上移止损锁利</div>
+  {% if is_bear %}
+    <div style="padding:12px;color:var(--red);">🛑 空仓观望: 本期不给出买入计划。空头排列下任何买点胜率均不足, 持币等待多头信号。</div>
+  {% else %}
+  <div style="font-size:12px;color:var(--text-muted);padding:0 12px 8px;">评级: 重点 &gt; 关注 &gt; 观察 &gt; 暂避 · 仓位为单标的上限建议{% if regime == '震荡' %} (震荡薄边已按0.6×降仓){% endif %} · 破止损离场 / 触目标止盈 / 盈利&gt;8%上移止损锁利</div>
   {% set rate_cls = {'重点':'var(--green)','关注':'var(--accent)','观察':'var(--yellow)','暂避':'var(--red)'} %}
-  {% for c in candidates[:15] %}
+  {% for c in final[:15] %}
   {% set rc = rate_cls.get(c.rating, 'var(--text-muted)') %}
   <div class="card" style="margin-bottom:8px;">
     <div style="display:flex;align-items:center;">
@@ -100,6 +127,7 @@
     <div style="font-size:12px;color:var(--text-muted);padding:1px 0 2px 0;">🛒 {{ c.sell_hint }}</div>
   </div>
   {% endfor %}
+  {% endif %}
   {% set excluded = data.breakthrough.get('excluded', []) if data.breakthrough else [] %}
   {% if excluded %}
   <div class="card" style="margin-top:10px;border-left:3px solid var(--red);">
