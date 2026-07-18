@@ -241,6 +241,14 @@ def classify_stage(closes: List[float], highs: List[float], lows: List[float],
     above_resistance = resistance is not None and price >= resistance
     near_resistance = resistance is not None and price >= resistance * 0.97
 
+    # 新鲜突破: 近15日(不含今日)曾低于阻力位 → 近期才来到箱顶附近/上方,
+    # 属"箱体整理后向上突破"的起涨点, 而非早已突破、在上方运行已久的票。
+    # 这是箱体突破选股的关键过滤: 只买"刚突破/即将突破", 不追"已突破大涨"。
+    fresh_breakout = False
+    if resistance is not None and (above_resistance or near_resistance):
+        recent_prev = closes[-16:-1] if len(closes) >= 16 else closes[:-1]
+        fresh_breakout = any(c < resistance for c in recent_prev)
+
     d = {
         "band_width": round(plat["band_width"], 4) if plat["band_width"] else None,
         "is_platform": plat["is_platform"],
@@ -256,6 +264,7 @@ def classify_stage(closes: List[float], highs: List[float], lows: List[float],
         "resistance": round(resistance, 2) if resistance else None,
         "support": round(support, 2) if support else None,
         "pct_to_resistance": round((price / resistance - 1) * 100, 2) if resistance else None,
+        "fresh_breakout": fresh_breakout,
     }
 
     signals = []
@@ -275,6 +284,8 @@ def classify_stage(closes: List[float], highs: List[float], lows: List[float],
         signals.append("均线多头排列")
     if above_resistance:
         signals.append("突破平台上沿")
+    if fresh_breakout:
+        signals.append("箱体突破(新鲜)")
 
     # ── 状态判定 ──
     hist_pos = m["hist"] is not None and m["hist"] > 0 and m["dif"] > m["dea"]

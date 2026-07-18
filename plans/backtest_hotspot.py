@@ -114,30 +114,86 @@ def _trading_days(buy_date, sell_date):
 
 
 # 缓存: 板块池(全量概念板块过滤结果)与 各板块成分股列表, 供 walk-forward 多买点复用, 避免重复网络请求
+# 磁盘持久化: 板块池/成分股列表快照变化极小, 落盘 data/concepts/ 后二次回测零触网(仅当天首次抓)。
+import json as _json
+_CONCEPT_DIR = os.path.join(BASE_DIR, "data", "concepts")
+_BOARD_POOL_PATH = os.path.join(_CONCEPT_DIR, "board_pool.json")
 _board_pool_cache = None
 _board_stocks_cache = {}
+_NET_CONCEPT_HITS = 0  # 板块/成分股实际触网次数 (验证缓存复用)
+
+
+def _net_concept_hits():
+    return _NET_CONCEPT_HITS
+
+
+def _concept_fresh(path, fresh_days=1):
+    """磁盘缓存是否新鲜 (默认1天, 成分股/板块榜单日变更极小)"""
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, "r") as f:
+            obj = _json.load(f)
+        fa = obj.get("fetched_at")
+        if not fa:
+            return False
+        gap = (datetime.now() - datetime.strptime(fa, "%Y-%m-%d %H:%M:%S")).days
+        return gap <= fresh_days
+    except Exception:
+        return False
 
 
 def get_board_pool(pool_size=120, heat_per=8, verbose=True):
-    """取新浪全量概念板块 (过滤风格/地域/市值类) 作为板块池, 进程内缓存。"""
+    """取新浪全量概念板块 (过滤风格/地域/市值类) 作为板块池, 进程内+磁盘双缓存。"""
     global _board_pool_cache
     if _board_pool_cache is not None:
         return _board_pool_cache
+    # 磁盘命中: 直接复用, 零触网
+    if _concept_fresh(_BOARD_POOL_PATH, fresh_days=1):
+        try:
+            with open(_BOARD_POOL_PATH, "r") as f:
+                _board_pool_cache = _json.load(f)["pool"]
+            return _board_pool_cache
+        except Exception:
+            pass
     raw = concept_rank_sina(limit=400)
     pool = filter_concepts([{
         "name": c["name"], "bk_code": c["code"],
         "change_pct": c.get("change_pct", 0),
     } for c in raw])[:pool_size]
     _board_pool_cache = pool
+    # 落盘
+    os.makedirs(_CONCEPT_DIR, exist_ok=True)
+    try:
+        with open(_BOARD_POOL_PATH, "w") as f:
+            _json.dump({"fetched_at": time.strftime("%Y-%m-%d %H:%M:%S"), "pool": pool}, f)
+    except Exception:
+        pass
     return pool
 
 
 def _board_stocks(bk_code, name, limit=8):
-    """取板块成分股列表 (进程内缓存, 成分股快照一周内变化极小)"""
+    """取板块成分股列表 (进程内+磁盘双缓存, 成分股快照一周内变化极小)"""
     if bk_code in _board_stocks_cache:
         return _board_stocks_cache[bk_code]
+    path = os.path.join(_CONCEPT_DIR, f"stocks_{bk_code}.json")
+    if _concept_fresh(path, fresh_days=1):
+        try:
+            with open(path, "r") as f:
+                stocks = _json.load(f)["stocks"]
+            _board_stocks_cache[bk_code] = stocks
+            return stocks
+        except Exception:
+            pass
     stocks = fetch_concept_stocks_sina(bk_code, name, limit=limit)
     _board_stocks_cache[bk_code] = stocks
+    _NET_CONCEPT_HITS += 1
+    os.makedirs(_CONCEPT_DIR, exist_ok=True)
+    try:
+        with open(path, "w") as f:
+            _json.dump({"fetched_at": time.strftime("%Y-%m-%d %H:%M:%S"), "stocks": stocks}, f)
+    except Exception:
+        pass
     return stocks
 
 
@@ -202,7 +258,7 @@ def select_on(buy_date, hotspots, top_n, per, score_filter,
     excluded = 0
     for name, info in hotspots[:top_n]:
         try:
-            stocks = fetch_concept_stocks_sina(info["bk_code"], name, limit=per)
+            stocks = _board_stocks(info["bk_code"], name, limit=per)
         except Exception:
             continue
         for s in stocks:
@@ -382,7 +438,7 @@ def build_pool(buy_date, hotspots, top_n, per, verbose=True):
     seen = set()
     for name, info in hotspots[:top_n]:
         try:
-            stocks = fetch_concept_stocks_sina(info["bk_code"], name, limit=per)
+            stocks = _board_stocks(info["bk_code"], name, limit=per)
         except Exception:
             continue
         for s in stocks:
@@ -507,6 +563,37 @@ def strat_healthymom(pool, runup_pct=40, buy_date=None):
     return out
 
 
+def strat_box_breakout(pool, runup_pct=40, buy_date=None):
+    """S9 箱体突破: 长期盘整(箱体)后放量向上突破箱顶。
+
+    原理: 股价在狭窄区间(箱体)长期盘整→供需平衡、浮筹沉淀、成交量萎缩;
+          放量站上箱顶(阻力位)=买方压倒卖方, 突破临界点, 开启趋势行情。
+          盘整越久、箱体越收敛、突破量能越大, 后续趋势越可靠(经典基底突破)。
+    量能确认: 突破时量比>=1.3(放量, 过滤无量假突破);
+    价位确认: 新鲜突破(fresh_breakout, 近15日刚到箱顶附近/上方, 非早已突破大涨)
+              或 即将启动(about_to_launch, 箱体已建成+波动极致收缩的突破前夜);
+    共振确认: 均线多头或MACD/KDJ金叉(趋势/动能确认)。
+    """
+    out = []
+    for c in pool:
+        d = c.get("details", {})
+        st = c.get("stage")
+        if not d.get("is_platform"):
+            continue
+        if (d.get("band_width") or 1) > 0.18:
+            continue
+        if not (d.get("fresh_breakout") or st == "about_to_launch"):
+            continue
+        if (d.get("vol_ratio") or 1) < 1.3:
+            continue
+        if not (d.get("macd_gc") or d.get("kdj_gc") or d.get("ma_bull")):
+            continue
+        if _not_chase(c, runup_pct):
+            continue
+        out.append(c)
+    return out
+
+
 def _market_weak(buy_date, fast=20, slow=60):
     """买点处上证 MA(fast) <= MA(slow) → 市场处于下降趋势 (应空仓, 剔除该买点虚假信号)。"""
     try:
@@ -546,6 +633,7 @@ STRATEGIES = [
     ("S6 强趋势低波动", strat_steady),
     ("S7 健康动量", strat_healthymom),
     ("S8 趋势回调+择时", strat_timing),
+    ("S9 箱体突破", strat_box_breakout),
 ]
 
 

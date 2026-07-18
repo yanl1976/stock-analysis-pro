@@ -36,6 +36,10 @@ config/user.yaml
 data/watchlist.json
 cache/
 
+# 持久化K线/板块缓存 (本地保留便于频繁回测, 但体积大且可重抓, 不进版本库)
+data/klines/
+data/concepts/
+
 # Secrets (含企业微信等密钥配置)
 .env
 

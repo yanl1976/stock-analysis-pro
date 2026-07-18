@@ -17,9 +17,11 @@
 策略微调 (与 backtest_hotspot 回测结论一致):
   · 大盘三状态路由 (实战核心): 先判上证 MA20 vs MA60 得 多头/震荡/空头,
     再蒸馏不同选股策略 (见 REGIME_STRATEGY / apply_regime_strategy):
-      - 多头(MA20>MA60): 顺势低吸 = 回调低吸(S5) ∪ 强趋势低波动(S6), 回测胜率76-77%
-      - 震荡(MA20≈MA60): 高胜率共振(S3), 回测胜率56%, 薄边降仓(0.6×)
+      - 多头(MA20>MA60): 顺势低吸 = 回调低吸(S5) ∪ 强趋势低波动(S6) ∪ 箱体突破(S9)
+      - 震荡(MA20≈MA60): 高胜率共振(S3) ∪ 箱体突破(S9), 薄边降仓(0.6×)
       - 空头(MA20<MA60): 空仓观望, 不出股 (回测无可靠策略, 避免买点窗口虚假信号)
+  · 箱体突破(S9): 长期盘整(箱体)后放量向上突破箱顶——量能(量比≥1.5)+价位(新鲜突破)+
+    共振(金叉/多头)三重确认, 只买"刚突破"不追"已突破大涨"(详见报告【三b】)。
   · 前期大涨不追: 截至今天前 runup_days 日累计涨幅 > runup_pct% 直接剔除推荐 (等回踩不追高)
   · 每只推荐自带纪律买卖: 买点 / 止损价 / 目标价(take_profit) / 仓位 / 卖出提示(移动止损锁利)
 """
@@ -43,6 +45,17 @@ from analysis.breakout import STAGE_LABELS
 
 
 # ───────────────── 形态成功率 / 买入计划 ─────────────────
+# 科学退出参数 (与 backtest_weekly_hotspot.settle_smart 同源口径):
+#   初始硬止损 -7% → 涨+12%减仓半仓锁利 → 减仓后破MA20(趋势线)或回撤10%清仓, 止损上移保本。
+SMART_EXIT = {
+    "stop_pct": 0.07,        # 初始硬止损 (突破-7% / 其他-8%)
+    "scale_out_pct": 0.12,   # 涨幅达 +12% 触发减仓 (平衡: 不过早减仓)
+    "scale_out_frac": 0.5,   # 减仓比例 (半仓)
+    "trailing_pct": 0.10,    # 减仓后移动止损 (从峰值回撤 10%, 让利润奔跑)
+    "use_ma20": True,        # 破 MA20 = 破趋势线 → 清仓
+}
+
+
 def _estimate_win_rate(stage, signals):
     """依据形态状态 + 信号共振, 估算形态成功率 (0~1)。
 
@@ -97,10 +110,10 @@ def _build_plan(c, win_rate, rating):
             buy = "次日高开不破分时均线轻仓试，或回踩5日线≈¥%.2f低吸" % (price * 0.94)
         else:
             buy = "突破回踩5日线≈¥%.2f低吸，放量过前高加仓" % (price * 0.95)
-        stop = price * 0.91
+        stop = price * 0.93        # 突破: 初始止损 -7%
     else:
         buy = "缩量回踩¥%.2f–%.2f低吸，突破信号确认再加仓" % (price * 0.95, price * 0.97)
-        stop = price * 0.90
+        stop = price * 0.92        # 其他: 初始止损 -8%
     stop_pct = round((stop / price - 1) * 100, 1) if price else 0
     position = {"重点": 8, "关注": 8, "观察": 6, "暂避": 5}.get(rating, 5)
     return buy, round(stop, 2), stop_pct, position
@@ -136,12 +149,15 @@ def _prior_runup(symbol, lookback=20, ref_date=None):
 
 
 def _sell_hint(buy_price, stage, stop_loss):
-    """生成卖出提示: 目标价 + 移动止损规则 (盈利后锁利)。"""
-    tp = round(buy_price * (1.18 if stage == "breakout" else 1.12), 2)
-    tp_pct = round((tp / buy_price - 1) * 100)
-    hint = (f"目标价≈¥{tp} (约+{tp_pct}%); 破¥{stop_loss}止损; "
-            f"盈利>8%后上移止损至成本价锁利")
-    return tp, hint
+    """生成卖出提示 (科学止盈/止损): 涨+10%减仓半仓锁利; 减仓后破MA20(趋势线)
+    或回撤8%清仓; 破止损价离场 (减仓后止损上移保本)。"""
+    so = SMART_EXIT["scale_out_pct"]
+    scale_price = round(buy_price * (1 + so), 2)
+    tp_pct = round(so * 100)
+    tr = int(SMART_EXIT["trailing_pct"] * 100)
+    hint = (f"涨+{tp_pct}%减仓半仓(¥{scale_price})锁利; 减仓后破MA20(趋势线)或回撤{tr}%清仓; "
+            f"破¥{stop_loss}止损(减仓后上移保本)")
+    return scale_price, hint
 
 
 def enrich_candidates(breakthrough, runup_days=20, runup_pct=40):
@@ -263,16 +279,18 @@ def apply_regime_strategy(candidates, regime, buy_date):
 
     直接复用 backtest_hotspot 的 strat_* 函数 (与回测同源, 保证口径一致)。
     """
-    from plans.backtest_hotspot import strat_pullback, strat_steady, strat_highwr
+    from plans.backtest_hotspot import strat_pullback, strat_steady, strat_highwr, strat_box_breakout
     if regime == "空头":
         return []
     if regime == "多头":
-        # 顺势低吸: 回调低吸(S5) ∪ 强趋势低波动(S6), 去重
+        # 顺势低吸: 回调低吸(S5) ∪ 强趋势低波动(S6) ∪ 箱体突破(S9), 去重
         pb = [c for c in candidates if c.get("kl")]
         picks = strat_pullback(pb, runup_pct=40, buy_date=buy_date)
         picks += strat_steady(candidates, runup_pct=40, buy_date=buy_date)
-    else:  # 震荡 / 未知 → 高胜率共振(S3)
+        picks += strat_box_breakout(candidates, runup_pct=40, buy_date=buy_date)
+    else:  # 震荡 / 未知 → 高胜率共振(S3) ∪ 箱体突破(S9)
         picks = strat_highwr(candidates, runup_pct=40, buy_date=buy_date)
+        picks += strat_box_breakout(candidates, runup_pct=40, buy_date=buy_date)
     seen = set()
     out = []
     for c in picks:
@@ -418,6 +436,16 @@ def build_report(date_str: str, hotspots: list, watchlist_picks: list,
                 lines.append(f"    · {e['name']}({e['symbol']}) ¥{e.get('price','—')} 前期{ru_s} "
                              f"热点:{'、'.join(e.get('concepts', []))}")
 
+    # 三b、箱体突破原理与选股逻辑
+    lines.append(f"\n【三b、箱体突破原理与选股逻辑 (S9)】")
+    lines.append(f"  · 长期盘整(箱体): 股价在相对狭窄区间(箱底支撑~箱顶阻力)内上下波动, "
+                 f"波动逐步收敛、成交量萎缩——这是供需再平衡、浮筹沉淀的过程, 也是主力吸筹的常见形态。")
+    lines.append(f"  · 向上突破: 放量站上箱顶(阻力位)=买方力量压倒卖方, 突破临界点; "
+                 f"量能确认突破有效性(无量上冲多为假突破, 易回落箱体内)。")
+    lines.append(f"  · 选股门槛(量价共振): ①箱体已建成(平台波动<15%) ②新鲜突破(近15日刚站上箱顶, "
+                 f"非已大涨) ③放量确认(量比≥1.5) ④均线多头或MACD/KDJ金叉共振。")
+    lines.append(f"  · 退出: 沿用科学止盈/止损(涨+12%减仓半仓→破MA20/回撤10%清仓), 让突破后的趋势充分奔跑。")
+
     # 四、买入建议与计划
     lines.append(f"\n【四、买入建议与计划 (形态成功率 + 综合评级 + 纪律买卖)】")
     if "error" in breakthrough:
@@ -428,7 +456,8 @@ def build_report(date_str: str, hotspots: list, watchlist_picks: list,
     else:
         lines.append("  评级: 重点 > 关注 > 观察 > 暂避 | 仓位为单标的上限建议"
                      + (" (震荡薄边已按0.6×降仓)" if regime == "震荡" else ""))
-        lines.append("  纪律: 破止损价离场; 触目标价止盈; 盈利>8%上移止损至成本锁利")
+        lines.append("  纪律(科学止盈/止损): 破止损价离场; 涨+12%减仓半仓锁利; "
+                     "减仓后破MA20(趋势线)或回撤10%清仓, 减仓后止损上移保本")
         for i, c in enumerate(final[:12], 1):
             wr = c.get("win_rate")
             wr_str = f"{wr*100:.0f}%" if isinstance(wr, (int, float)) else "—"

@@ -29,8 +29,17 @@ from collectors.quote import kline, realtime
 from analysis.breakout import classify_stage, STAGE_LABELS
 
 # ── K线磁盘缓存 (避免重复触网) ──
-CACHE_DIR = os.path.join(BASE_DIR, "cache")
-CACHE_TTL = 86400  # 1 天
+# 设计: 按 symbol 永久落盘全量K线到 data/klines/kl_<symbol>.json,
+#       记录 fetched_at(抓取时间) 与 last_date(数据最新交易日)。
+# 历史买点回测: 缓存的 last_date 必 ≥ 买点日期(全量含买点前所有历史),
+#       故历史买点永远命中永久缓存、零触网; 仅"今天/最近"有增量刷新。
+# 不再用 days 做缓存键(避免 250/800 两套缓存互不共享), 读取时再按 days 截断。
+KL_DIR = os.path.join(BASE_DIR, "data", "klines")
+# ── K线校验阈值 ──
+MAX_STALE_DAYS = 365   # 缓存最新交易日距今超此值(如坏缓存停在2011)→重抓; 正常短期刷新不触发, 保证回测零触网
+MIN_BARS = 60          # 有效K线最少根数
+GAP_WARN_DAYS = 10     # 相邻交易日间隔超此值→记为缺口(警告, 不致命)
+_KL_FETCH_DAYS = 6000  # 新浪单页最大 datalen, 覆盖上市至今全历史(约6000根日线)
 
 
 def _bare(symbol: str) -> str:
@@ -39,23 +48,211 @@ def _bare(symbol: str) -> str:
     return symbol[2:] if symbol[:2] in ("sh", "sz") else symbol
 
 
-def _kline_cached(symbol: str, days: int = 250):
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    key = f"kl_{symbol}_{days}"
-    path = os.path.join(CACHE_DIR, f"{key}.json")
-    if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < CACHE_TTL:
+def _kl_path(symbol: str) -> str:
+    return os.path.join(KL_DIR, f"kl_{symbol}.json")
+
+
+def _kl_sanitize(kl):
+    """修复新浪零填充异常日, 返回干净K线。
+
+    - open=high=low=volume=0 但 close>0: 新浪对停牌/异常日的零填充, 用收盘价补全为平盘。
+    - close<=0: 完全无效日, 丢弃(避免污染回测)。
+    - high<low: 交换修正。
+    """
+    out = []
+    for b in kl:
         try:
-            with open(path, "r") as f:
-                return json.load(f)
+            o = float(b.get("open", 0)); h = float(b.get("high", 0))
+            l = float(b.get("low", 0)); c = float(b.get("close", 0))
+            v = float(b.get("volume", 0))
         except Exception:
-            pass
-    kl = kline(symbol, days=days)
+            continue
+        if c <= 0:
+            continue  # 完全无效日, 丢弃
+        if o == 0 and h == 0 and l == 0 and v == 0:
+            o = h = l = c  # 零填充异常→平盘
+        elif o == 0:
+            o = c
+        if h < l:
+            h, l = max(h, l), min(h, l)
+        out.append({"date": b.get("date", ""), "open": o, "high": h,
+                    "low": l, "close": c, "volume": v})
+    return out
+
+
+def _kl_load(symbol: str):
+    """读磁盘缓存, 返回 (kl_list, last_date, stale_accepted, short_history) 或 (None, None, False, False)。
+
+    stale_accepted: 该股票数据源天然缺失(退市/停牌), 重抓仍停在旧日期, 已标记接受。
+    short_history: 上市不足 MIN_BARS 天(次新股), 数据有效但过短, 已标记避免重复抓取。
+    """
+    path = _kl_path(symbol)
+    if not os.path.exists(path):
+        return None, None, False, False
     try:
-        with open(path, "w") as f:
-            json.dump(kl, f)
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        kl = obj.get("kl")
+        if not kl:
+            return None, None, False, False
+        last_date = kl[-1]["date"][:10] if kl[-1].get("date") else None
+        return kl, last_date, bool(obj.get("stale_accepted", False)), bool(obj.get("short_history", False))
+    except Exception:
+        return None, None, False, False
+
+
+def _kl_save(symbol: str, kl, stale_accepted: bool = False, short_history: bool = False):
+    os.makedirs(KL_DIR, exist_ok=True)
+    path = _kl_path(symbol)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"symbol": symbol, "fetched_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                       "last_date": kl[-1]["date"][:10] if kl else None,
+                       "bars": len(kl), "stale_accepted": stale_accepted,
+                       "short_history": short_history, "kl": kl}, f)
     except Exception:
         pass
-    return kl
+
+
+def _kl_validate(kl, max_stale: int = MAX_STALE_DAYS, today=None):
+    """校验K线完整有效, 返回 (ok:bool, info:str)。
+
+    - 结构性: 字段非空/OHLC有效(high>=low, 价格>0)/最小长度/日期可解析
+    - 新鲜度: 最新交易日距今天 ≤ max_stale
+    """
+    if not kl:
+        return False, "empty"
+    if len(kl) < MIN_BARS:
+        return False, f"bars={len(kl)}<{MIN_BARS}"
+    today = today or datetime.now()
+    last = kl[-1].get("date", "")[:10]
+    try:
+        ld = datetime.strptime(last, "%Y-%m-%d")
+    except Exception:
+        return False, f"bad last_date={last}"
+    stale = (today - ld).days
+    if stale > max_stale:
+        return False, f"stale {last} ({stale}d>{max_stale})"
+    for b in kl:
+        if not b.get("date"):
+            return False, "empty date"
+        try:
+            o, h, l, c, v = (float(b["open"]), float(b["high"]),
+                             float(b["low"]), float(b["close"]), float(b["volume"]))
+        except Exception:
+            return False, f"bad field @{b.get('date')}"
+        if min(o, h, l, c) <= 0:
+            return False, f"nonpositive @{b.get('date')}"
+        if h < l - 1e-6:
+            return False, f"high<low @{b.get('date')}"
+        if v < 0:
+            return False, f"neg vol @{b.get('date')}"
+    gaps = 0
+    for i in range(1, len(kl)):
+        try:
+            d0 = datetime.strptime(kl[i - 1]["date"][:10], "%Y-%m-%d")
+            d1 = datetime.strptime(kl[i]["date"][:10], "%Y-%m-%d")
+        except Exception:
+            return False, "date parse error"
+        if (d1 - d0).days > GAP_WARN_DAYS:
+            gaps += 1
+    return True, f"ok bars={len(kl)} gaps={gaps}"
+
+
+def _kl_struct_ok(kl):
+    """仅结构性校验(忽略新鲜度), 用于判断数据源天然缺失(退市/停牌股)。"""
+    return _kl_validate(kl, max_stale=10 ** 9)[0]
+
+
+def _kl_fields_ok(kl):
+    """仅校验每个 bar 字段有效(OHLC>0 / high>=low / vol>=0 / 日期可解析), 忽略长度与新鲜度。
+
+    用于判断"数据本身是否可用"(含次新股短序列), 与 _kl_struct_ok(含 MIN_BARS 长度门槛)区分。
+    """
+    if not kl:
+        return False
+    for b in kl:
+        if not b.get("date"):
+            return False
+        try:
+            o, h, l, c, v = (float(b["open"]), float(b["high"]),
+                             float(b["low"]), float(b["close"]), float(b["volume"]))
+        except Exception:
+            return False
+        if min(o, h, l, c) <= 0:
+            return False
+        if h < l - 1e-6:
+            return False
+        if v < 0:
+            return False
+    return True
+
+
+def _fetch_full_kline(symbol: str, max_retry: int = 3):
+    """新浪日线(不复权, 与回测口径一致)拉全历史(上市至今)。
+
+    新浪 getKLineData 支持 datalen 上限约6000根(≈24年), 单次即覆盖全历史。
+    返回升序 [{date,open,high,low,close,volume}]。
+    """
+    from collectors.quote import kline
+    for attempt in range(max_retry):
+        try:
+            kl = kline(symbol, days=_KL_FETCH_DAYS)
+            if kl:
+                return _kl_sanitize(kl)
+        except Exception:
+            time.sleep(0.5 * (attempt + 1))
+    return []
+
+
+# 网络请求计数器 (供回测/批量打印"触网次数", 验证缓存复用)
+_NET_KLINE_HITS = 0
+
+
+def _kline_net_hits():
+    return _NET_KLINE_HITS
+
+
+def _kline_cached(symbol: str, days: int = 250, force_refresh: bool = False):
+    """取K线: 优先磁盘永久缓存(校验通过即复用), 过期/缺失则新浪全历史重抓。
+
+    回测场景: 历史K线永不变, 正常缓存校验通过→零触网(仅极旧坏缓存如停在2011才重抓)。
+    数据源天然缺失(退市/停牌股, 重抓仍停在旧日期): 标记 stale_accepted, 避免无限重抓。
+    实盘场景: 传 force_refresh=True 强制重抓最新。
+    返回: 按 days 截断末尾 days 根(与原接口返回结构一致)。
+    """
+    global _NET_KLINE_HITS
+    kl, last_date, sa, short_hist = _kl_load(symbol)
+    if not force_refresh and kl:
+        if sa and _kl_struct_ok(kl):
+            return kl[-days:] if days and days < len(kl) else kl
+        if short_hist and _kl_fields_ok(kl):
+            return kl[-days:] if days and days < len(kl) else kl
+        if _kl_validate(kl)[0]:
+            return kl[-days:] if days and days < len(kl) else kl
+    _NET_KLINE_HITS += 1
+    old_last = last_date
+    try:
+        kl = _fetch_full_kline(symbol)
+    except Exception:
+        kl = []
+    if kl:
+        fresh_ok, _ = _kl_validate(kl)
+        struct_ok = _kl_struct_ok(kl)
+        if struct_ok:
+            new_last = kl[-1]["date"][:10]
+            try:
+                new_stale = (datetime.now() - datetime.strptime(new_last, "%Y-%m-%d")).days
+            except Exception:
+                new_stale = 0
+            if old_last is None:
+                accepted = new_stale > MAX_STALE_DAYS      # 首次即很旧→数据源旧股
+            else:
+                accepted = (old_last == new_last) and (new_stale > MAX_STALE_DAYS)  # 重抓无变化且很旧
+            short_history = len(kl) < MIN_BARS
+            _kl_save(symbol, kl, stale_accepted=accepted, short_history=short_history)
+            return kl[-days:] if days and days < len(kl) else kl
+    return []
 
 
 def run(top_concepts: int = 5, top_per_concept: int = 15,

@@ -10,8 +10,12 @@ _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like
 
 
 def _prefix_symbol(symbol: str) -> str:
-    """60xxxx -> sh60xxxx, 00/30xxxx -> sz00xxxx"""
+    """交易所前缀:
+    60xxxx/688xxx/900xxx(沪B) -> sh; 00/30/20xxxx(深) -> sz; 8xxxxx/920xxx(北交所) -> bj
+    """
     symbol = symbol.strip()
+    if symbol.startswith(("8", "920")):
+        return f"bj{symbol}"
     if symbol.startswith(("6", "9")):
         return f"sh{symbol}"
     return f"sz{symbol}"
