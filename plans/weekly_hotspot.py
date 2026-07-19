@@ -35,6 +35,8 @@ from datetime import datetime
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 DATA_DIR = os.path.join(BASE_DIR, "data")
+REPORTS_DIR = os.path.join(DATA_DIR, "reports")
+os.makedirs(REPORTS_DIR, exist_ok=True)
 WATCHLIST_PATH = os.path.join(DATA_DIR, "watchlist.json")
 
 from collectors.concept import concept_rank_sina, merge_duplicate_concepts
@@ -899,7 +901,7 @@ def main():
             print(f"[HTML] 报告生成失败: {e}", file=sys.stderr)
 
     # 报告落盘 (无论是否推送都保留交付物)
-    report_path = os.path.join(DATA_DIR, f"weekly_hotspot_report_{date_str}.md")
+    report_path = os.path.join(REPORTS_DIR, f"weekly_hotspot_report_{date_str}.md")
     try:
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(report)

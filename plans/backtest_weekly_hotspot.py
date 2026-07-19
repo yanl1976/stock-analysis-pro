@@ -32,6 +32,8 @@ from datetime import datetime
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 DATA_DIR = os.path.join(BASE_DIR, "data")
+REPORTS_DIR = os.path.join(DATA_DIR, "reports")
+os.makedirs(REPORTS_DIR, exist_ok=True)
 
 from plans.backtest_hotspot import (
     restore_hotspots_on, get_board_pool, build_pool, settle, get_benchmark,
@@ -641,7 +643,7 @@ def main():
     report = build_report(res)
     print("\n" + report)
 
-    out = os.path.join(DATA_DIR, f"backtest_weekly_hotspot_{args.start}_{args.end}.md")
+    out = os.path.join(REPORTS_DIR, f"backtest_weekly_hotspot_{args.start}_{args.end}.md")
     try:
         with open(out, "w", encoding="utf-8") as f:
             f.write(report)

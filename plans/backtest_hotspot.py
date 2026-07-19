@@ -27,6 +27,8 @@ from datetime import datetime, timedelta
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 DATA_DIR = os.path.join(BASE_DIR, "data")
+REPORTS_DIR = os.path.join(DATA_DIR, "reports")
+os.makedirs(REPORTS_DIR, exist_ok=True)
 
 from collectors.concept import concept_rank_sina, fetch_concept_stocks_sina, merge_duplicate_concepts
 from plans.breakout_scan import _kline_cached, _bare
@@ -1676,7 +1678,7 @@ def main():
             wf_start, wf_end, args.hold_days, args.step_days, args.concepts,
             agg_results, buy_dates, window_summ, window_picks, best)
         print("\n" + report)
-        out = os.path.join(DATA_DIR, f"backtest_walkforward_{wf_start}_{wf_end}.md")
+        out = os.path.join(REPORTS_DIR, f"backtest_walkforward_{wf_start}_{wf_end}.md")
         try:
             with open(out, "w", encoding="utf-8") as f:
                 f.write(report)
@@ -1703,7 +1705,7 @@ def main():
         best_per = _best_per_strategy(results, min_n=args.min_n)
         report = build_sweep_report(results, meta, ranked, best_per)
         print("\n" + report)
-        out = os.path.join(DATA_DIR, f"backtest_sweep_{wf_start}_{wf_end}.md")
+        out = os.path.join(REPORTS_DIR, f"backtest_sweep_{wf_start}_{wf_end}.md")
         try:
             with open(out, "w", encoding="utf-8") as f:
                 f.write(report)
@@ -1732,7 +1734,7 @@ def main():
                               benchmark, excluded=excluded,
                               runup_days=args.runup_days, runup_pct=args.runup_pct)
         print("\n" + report)
-        out = os.path.join(DATA_DIR, f"backtest_hotspot_{args.buy}_{args.sell}.md")
+        out = os.path.join(REPORTS_DIR, f"backtest_hotspot_{args.buy}_{args.sell}.md")
         try:
             with open(out, "w", encoding="utf-8") as f:
                 f.write(report)
@@ -1751,7 +1753,7 @@ def main():
         report = build_trade_report(args.buy, args.sell, hotspots, args.concepts,
                                     results, best, seg_days)
         print("\n" + report)
-        out = os.path.join(DATA_DIR, f"backtest_trade_{args.buy}_{args.sell}.md")
+        out = os.path.join(REPORTS_DIR, f"backtest_trade_{args.buy}_{args.sell}.md")
         try:
             with open(out, "w", encoding="utf-8") as f:
                 f.write(report)
@@ -1783,7 +1785,7 @@ def main():
     print("\n" + report)
 
     # 落盘: 对比报告
-    out_cmp = os.path.join(DATA_DIR, f"backtest_strategies_{args.buy}_{args.sell}.md")
+    out_cmp = os.path.join(REPORTS_DIR, f"backtest_strategies_{args.buy}_{args.sell}.md")
     try:
         with open(out_cmp, "w", encoding="utf-8") as f:
             f.write(report)
