@@ -1396,21 +1396,25 @@ def build_trade_report(buy_date, sell_date, hotspots, top_n, results, best, seg_
     lines.append(f"  样本 {bs['n']} 只 | 胜率 {bs['win']:.0f}% | 动态均收益 {avg_s} | 超额 {ex_s} | 对照死拿 {ha_s}")
 
     bpicks = best[1]
-    lines.append(f"\n【四、最优策略逐笔交易明细 (买卖 + 退出信号, 前 20)】")
-    lines.append(f"  {'名称(代码)':<18}{'买价':>9}{'卖日':>11}{'卖价':>9}{'收益':>9}{'退出':>8}{'形态':>10}")
-    shown = 0
-    for p in sorted(bpicks, key=lambda x: -(x["return_pct"] or -999)):
-        if p.get("return_pct") is None:
+    # 第四节: 所有有效策略逐笔明细 (不止最优策略, 用户要求看到全部选股及交易明细)
+    idx = 0
+    lines.append(f"\n【四、各策略逐笔交易明细 (买卖 + 退出信号)】")
+    for name, picks, st in sorted(results, key=lambda x: (-x[2]["win"], -(x[2]["avg"] or -999))):
+        vp = [p for p in picks if p.get("return_pct") is not None]
+        if not vp:
             continue
-        nm = f"{p['name']}({p['symbol']})"
-        if len(nm) > 16:
-            nm = nm[:15] + "…"
-        lines.append(f"  {nm:<18}{p['buy_price']:>9.2f}{p['exit_date']:>11}"
-                     f"{p['exit_price']:>9.2f}{p['return_pct']:>+8.2f}%{p['exit_reason']:>8}"
-                     f"{STAGE_LABELS.get(p['stage'], ''):>10}")
-        shown += 1
-        if shown >= 20:
-            break
+        idx += 1
+        mark = " ★(最优)" if name == best[0] else ""
+        avg_s = f"{st['avg']:+.2f}%" if st["avg"] is not None else "—"
+        lines.append(f"\n  4.{idx}  {name}{mark}  (样本 {len(vp)} 只, 均收益 {avg_s})")
+        lines.append(f"    {'名称(代码)':<18}{'买价':>9}{'卖日':>11}{'卖价':>9}{'收益':>9}{'退出':>8}{'形态':>10}")
+        for p in sorted(vp, key=lambda x: -(x["return_pct"] or -999)):
+            nm = f"{p['name']}({p['symbol']})"
+            if len(nm) > 16:
+                nm = nm[:15] + "…"
+            lines.append(f"    {nm:<18}{p['buy_price']:>9.2f}{p['exit_date']:>11}"
+                         f"{p['exit_price']:>9.2f}{p['return_pct']:>+8.2f}%{p['exit_reason']:>8}"
+                         f"{STAGE_LABELS.get(p['stage'], ''):>10}")
 
     from collections import Counter
     valid = [p for p in bpicks if p.get("return_pct") is not None]

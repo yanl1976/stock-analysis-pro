@@ -381,6 +381,13 @@ async def handle_message(client, frame):
                 l for l in _lines if not l.startswith("HTML_REPORT:")
             ).strip()
 
+    # 若脚本输出了企微摘要卡片标记块, 微信只推卡片 (不推整段全文报告, 避免堆文字)
+    if "<<<WECHAT_CARD_START>>>" in summary_text and "<<<WECHAT_CARD_END>>>" in summary_text:
+        _seg = summary_text.split("<<<WECHAT_CARD_START>>>", 1)[1]
+        _card = _seg.split("<<<WECHAT_CARD_END>>>", 1)[0].strip()
+        if _card:
+            summary_text = _card
+
     chunks = _split_by_bytes(summary_text or "(无输出)")
     if len(chunks) == 1:
         await client.reply_stream(frame, stream_id, chunks[0], True)

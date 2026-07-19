@@ -38,10 +38,11 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 WATCHLIST_PATH = os.path.join(DATA_DIR, "watchlist.json")
 
 from collectors.concept import concept_rank_sina, merge_duplicate_concepts
+from collectors.quote import realtime as _realtime
 from plans.concept_analysis import filter_concepts
 from plans.breakout_scan import run as run_breakthrough, format_report as fmt_breakthrough, _kline_cached
 from core.cli import save_watchlist
-from analysis.breakout import STAGE_LABELS
+from analysis.breakout import STAGE_LABELS, classify_stage as _classify_stage
 
 
 # ───────────────── 形态成功率 / 买入计划 ─────────────────
@@ -100,23 +101,96 @@ def _rating(score, win_rate, stage):
     return "暂避"
 
 
-def _build_plan(c, win_rate, rating):
-    """生成买点 / 止损 / 仓位 (规则化, 单位: 元 / %)。"""
+def _ma(closes, n):
+    """简单移动平均 (最近 n 根收盘)。数据不足返回 None。"""
+    if not closes or len(closes) < n:
+        return None
+    return round(sum(closes[-n:]) / n, 3)
+
+
+def _consec_above_ma5(closes):
+    """连续站在 MA5 上方的交易日数 (从最新往回数, 跌破即止)。"""
+    n = len(closes)
+    cnt = 0
+    for i in range(n - 1, -1, -1):
+        lo = max(0, i - 4)
+        window = closes[lo:i + 1]
+        if len(window) < 2:
+            break
+        m = sum(window) / len(window)
+        if closes[i] >= m - 1e-9:
+            cnt += 1
+        else:
+            break
+    return cnt
+
+
+def _trend_state(closes, price):
+    """均线 + 趋势状态, 供 A+B 买点 与 选股策略门控。
+
+    选股策略 = 趋势 + 突破 + 共振, 仅在以下两种情形给回踩低吸买点:
+      1) 多头排列 (bull):  MA5 > MA10 > MA20 且 现价 >= MA5
+      2) 调整后站稳5日线 (steady): 现价 >= MA5 且 连续 >=3 日收盘 >= MA5
+    其余(破位/无多头排列/在MA5下方) → 不给追高买点, 等放量收复MA5。
+    """
+    ma5 = _ma(closes, 5)
+    ma10 = _ma(closes, 10)
+    ma20 = _ma(closes, 20)
+    if None in (ma5, ma10, ma20):
+        return {"ma5": ma5, "ma10": ma10, "ma20": ma20,
+                "bull": False, "steady": False, "above_ma5": False}
+    above_ma5 = price >= ma5 - 1e-9
+    bull = above_ma5 and (ma5 > ma10 > ma20)
+    steady = above_ma5 and _consec_above_ma5(closes) >= 3
+    return {"ma5": ma5, "ma10": ma10, "ma20": ma20,
+            "bull": bool(bull), "steady": bool(steady), "above_ma5": bool(above_ma5)}
+
+
+def _build_plan(c, win_rate, rating, ma=None):
+    """生成买点 / 止损 / 仓位 (A+B: 真均线 + 回踩带)。
+
+    ma: _trend_state 返回的均线状态 (含 ma5 / bull / steady)。
+      - ma5 可用且 (bull or steady): 买点 = 真 MA5 支撑(数值), 文字给 MA5 回踩带
+        (区间 = [MA5, 现价*0.98], 分批低吸); 止损 = 支撑下方 7%/8%。
+      - ma5 可用但 非多头排列且未站稳 (破位/弱势): 不给买点 (buy_level=None),
+        文字提示"等放量收复5日线"。
+      - ma5 缺失 (K线不足): 降级为旧固定百分比, 避免报告空白。
+    返回值新增第 5 项 buy_level (None 表示当前不可买)。
+    """
     price = float(c.get("price") or 0)
     stage = c.get("stage")
-    chg = float(c.get("change_pct") or 0)
-    if stage == "breakout":
-        if chg >= 9.5:
-            buy = "次日高开不破分时均线轻仓试，或回踩5日线≈¥%.2f低吸" % (price * 0.94)
+    ma5 = (ma or {}).get("ma5")
+    bull = (ma or {}).get("bull")
+    steady = (ma or {}).get("steady")
+
+    if ma5 is not None and (bull or steady):
+        support = ma5
+        band_high = round(max(support, price * 0.98), 2)
+        if stage == "breakout":
+            buy = "突破回踩5日线≈¥%.2f低吸(¥%.2f–¥%.2f区间分批)" % (support, support, band_high)
         else:
-            buy = "突破回踩5日线≈¥%.2f低吸，放量过前高加仓" % (price * 0.95)
-        stop = price * 0.93        # 突破: 初始止损 -7%
+            buy = "缩量回踩5日线≈¥%.2f低吸(¥%.2f–¥%.2f区间分批)" % (support, support, band_high)
+        stop = round(support * (0.93 if stage == "breakout" else 0.92), 2)
+        buy_level = round(support, 2)
+    elif ma5 is not None:
+        # 弱势/破位: 不给追高买点, 等放量收复 MA5
+        buy = "现价¥%.2f 跌破/未站稳5日线(MA5≈¥%.2f), 等放量收复5日线再考虑低吸" % (price, ma5)
+        stop = round(price * 0.93, 2)
+        buy_level = None
     else:
-        buy = "缩量回踩¥%.2f–%.2f低吸，突破信号确认再加仓" % (price * 0.95, price * 0.97)
-        stop = price * 0.92        # 其他: 初始止损 -8%
-    stop_pct = round((stop / price - 1) * 100, 1) if price else 0
+        # 无均线数据, 降级旧固定百分比(避免报告空白)
+        if stage == "breakout":
+            buy = "突破回踩5日线≈¥%.2f低吸" % (price * 0.95)
+            stop = round(price * 0.93, 2)
+            buy_level = round(price * 0.95, 2)
+        else:
+            buy = "缩量回踩¥%.2f–%.2f低吸" % (price * 0.95, price * 0.97)
+            stop = round(price * 0.92, 2)
+            buy_level = round(price * 0.96, 2)
+
+    stop_pct = round((stop / price - 1) * 100, 1) if (price and stop) else 0
     position = {"重点": 8, "关注": 8, "观察": 6, "暂避": 5}.get(rating, 5)
-    return buy, round(stop, 2), stop_pct, position
+    return buy, round(stop, 2), stop_pct, position, buy_level
 
 
 def _prior_runup(symbol, lookback=20, ref_date=None):
@@ -160,6 +234,123 @@ def _sell_hint(buy_price, stage, stop_loss):
     return scale_price, hint
 
 
+def enrich_watchlist(codes, verbose=False):
+    """人工自选股 = data/watchlist.json 的纯代码列表; 补全 名称/现价/涨跌幅/形态分析,
+    使「自选股」栏目呈现「综合分析」而非仅代码。
+
+    单只失败不影响其它 (实时行情/缓存缺失均降级为仅代码)。零触网部分走 K线缓存。
+    """
+    out = []
+    for code in (codes or []):
+        code = str(code).strip()
+        if not code:
+            continue
+        item = {
+            "code": code, "name": code, "price": None, "change_pct": None,
+            "stage": None, "score": None, "signals": [], "details": {},
+            "win_rate": None, "rating": None, "buy_point": None,
+            "stop_loss": None, "stop_pct": None, "take_profit": None, "sell_hint": None,
+        }
+        # 名称 + 现价 (腾讯实时, 单只失败不影响其它)
+        try:
+            q = _realtime(code)
+            item["name"] = q.get("name") or code
+            item["price"] = q.get("price")
+            item["change_pct"] = q.get("change_pct")
+        except Exception as e:
+            if verbose:
+                print(f"    [watchlist] {code} 实时行情失败: {e}")
+        # 形态分析 (K线缓存 + classify_stage, 零触网)
+        try:
+            kl = _kline_cached(code)
+            if kl:
+                closes = [b["close"] for b in kl]
+                highs = [b["high"] for b in kl]
+                lows = [b["low"] for b in kl]
+                vols = [b["volume"] for b in kl]
+                price = item["price"] if item["price"] else (closes[-1] if closes else 0)
+                res = _classify_stage(closes, highs, lows, vols, price=price)
+                item["stage"] = res.get("stage")
+                item["score"] = res.get("score")
+                item["signals"] = res.get("signals", [])
+                item["details"] = res.get("details", {})
+                wr = _estimate_win_rate(res.get("stage"), res.get("signals", []))
+                item["win_rate"] = wr
+                item["rating"] = _rating(res.get("score", 0), wr, res.get("stage"))
+                ma = _trend_state(closes, price) if (closes and len(closes) >= 20) else None
+                bp, sl, sp, pos, bl = _build_plan(
+                    {"price": price, "stage": res.get("stage"),
+                     "change_pct": item["change_pct"] or 0}, wr, item["rating"], ma)
+                item["buy_point"] = bp
+                item["buy_level"] = bl
+                item["stop_loss"] = sl if bl is not None else None
+                item["stop_pct"] = sp if bl is not None else 0
+                item["take_profit"], item["sell_hint"] = _sell_hint(price, res.get("stage"), sl)
+        except Exception as e:
+            if verbose:
+                print(f"    [watchlist] {code} 形态分析失败: {e}")
+        out.append(item)
+    return out
+
+
+def enrich_pool_entries(entries, verbose=False):
+    """策略股票池条目注入实时 当前价/当日涨幅, 并**按实时价重算买点/止损/止盈**
+    (不持久化到 stock_pool.json, 仅报告展示用)。
+
+    关键修复: 原 stock_pool.json 的 buy_level/stop_level/tp_level 在 refresh 时按当时
+    K线收盘价冻结, 与报告展示的实时「现价」时点错配 → 股价波动后买点严重偏离现价、
+    且数值买点与 buy_point 文字自相矛盾(数值=追高, 文字=回踩)。这里用实时价重算,
+    保证 买点/止损/止盈 三方同基准、符合"回踩低吸"逻辑。单只失败自动降级(留空)。"""
+    for e in (entries or []):
+        sym = str(e.get("symbol", "")).strip()
+        if not sym:
+            continue
+        try:
+            q = _realtime(sym)
+            price = q.get("price")
+            cp = q.get("change_pct")
+            if isinstance(price, (int, float)):
+                e["price"] = price
+            if isinstance(cp, (int, float)):
+                e["change_pct"] = cp
+            # 用实时价 + 真实 K线均线 重算数值关卡 (A+B: 真MA5 + 回踩带 + 选股门控)
+            if isinstance(price, (int, float)) and price > 0:
+                stage = e.get("stage")
+                rating = e.get("rating") or "暂避"
+                wr = e.get("win_rate")
+                if wr is None:
+                    wr = _estimate_win_rate(stage, e.get("signals", []) or [])
+                # 真实均线: 从 K线缓存取收盘, 算 MA5/10/20 + 趋势状态
+                ma = None
+                try:
+                    kl = _kline_cached(sym)
+                    if kl:
+                        closes = [float(b["close"]) for b in kl if b.get("close") is not None]
+                        if len(closes) >= 20:
+                            ma = _trend_state(closes, price)
+                except Exception as ex:
+                    if verbose:
+                        print(f"    [pool] {sym} K线/均线失败: {ex}")
+                buy_text, stop_base, stop_pct, position, bl = _build_plan(
+                    {"price": price, "stage": stage, "change_pct": cp or 0,
+                     "signals": e.get("signals", []) or [], "score": e.get("score")},
+                    wr, rating, ma)
+                tp_base = bl if bl is not None else price
+                tp, _ = _sell_hint(tp_base, stage, stop_base)
+                e["buy_level"] = bl
+                e["buy_point"] = buy_text
+                # 不可买(破位/弱势) → 止损/止盈置空, 卡片显示 '—'
+                e["stop_level"] = round(float(stop_base), 2) if bl is not None else None
+                e["stop_pct"] = stop_pct if bl is not None else 0
+                e["position"] = position
+                e["tp_level"] = round(float(tp), 2) if (bl is not None and tp) else None
+                e["take_profit"] = e["tp_level"]
+        except Exception as ex:
+            if verbose:
+                print(f"    [pool] {sym} 实时行情失败: {ex}")
+    return entries
+
+
 def enrich_candidates(breakthrough, runup_days=20, runup_pct=40):
     """对突破候选去重 (同股票跨多热点) + 叠加 win_rate / rating / plan 字段。
 
@@ -195,9 +386,14 @@ def enrich_candidates(breakthrough, runup_days=20, runup_pct=40):
             kl = _kline_cached(sym)
         except Exception:
             kl = None
+        ma = None
+        if kl:
+            closes_c = [float(b["close"]) for b in kl if b.get("close") is not None]
+            if len(closes_c) >= 20:
+                ma = _trend_state(closes_c, float(c.get("price") or 0))
         wr = _estimate_win_rate(c.get("stage"), c.get("signals", []))
         rating = _rating(c.get("score", 0), wr, c.get("stage"))
-        buy, stop, stop_pct, position = _build_plan(c, wr, rating)
+        buy, stop, stop_pct, position, bl = _build_plan(c, wr, rating, ma)
         tp, sell_hint = _sell_hint(float(c.get("price") or 0), c.get("stage"), stop)
         seen[sym] = {
             **c,
@@ -206,6 +402,7 @@ def enrich_candidates(breakthrough, runup_days=20, runup_pct=40):
             "concepts": [c.get("concept")],
             "win_rate": wr,
             "rating": rating,
+            "buy_level": bl,
             "buy_point": buy,
             "stop_loss": stop,
             "stop_pct": stop_pct,
@@ -353,15 +550,15 @@ def build_watchlist_from_candidates(breakthrough: dict, verbose: bool = True) ->
             "pct": round(float(c.get("change_pct", 0) or 0), 2),
             "concept": "、".join(cons),
         })
+    # 注: 自选股(人工)不再由本函数自动覆盖; 策略精选改由 main 加入股票池(stock_pool)
     wl_codes = [p["code"] for p in picks]
-    save_watchlist(wl_codes)
     if verbose:
-        print(f"  ✓ 自选股已重建(最终推荐买 list): {len(wl_codes)} 只")
+        print(f"  ✓ 策略精选候选 {len(wl_codes)} 只 (已交由股票池累积, 不覆盖人工自选股)")
     return picks
 
 
-def build_report(date_str: str, hotspots: list, watchlist_picks: list,
-                 breakthrough: dict, regime: str = None) -> str:
+def build_report(date_str: str, hotspots: list, human_watchlist: list,
+                 pool_entries: list, breakthrough: dict, regime: str = None) -> str:
     regime = regime or breakthrough.get("regime", "未知")
     rinfo = REGIME_STRATEGY.get(regime, REGIME_STRATEGY["未知"])
     final = breakthrough.get("final", breakthrough.get("candidates", []))
@@ -389,16 +586,56 @@ def build_report(date_str: str, hotspots: list, watchlist_picks: list,
         lead = f" 龙头:{c['leader']}({c['leader_pct']:+.1f}%)" if c.get("leader") else ""
         lines.append(f"  {i}. {c['name']} {c['change_pct']:+.2f}%  成交{amt_yi}亿{lead}")
 
-    # 二、自选股 (最终推荐买 list)
-    lines.append(f"\n【二、自选股更新 (最终推荐买 list · 经大盘三状态蒸馏)】")
-    lines.append(f"  共 {len(watchlist_picks)} 只, 已写入 data/watchlist.json:")
-    # 按版块分组展示
-    by_concept = {}
-    for p in watchlist_picks:
-        by_concept.setdefault(p["concept"], []).append(p)
-    for concept, picks in by_concept.items():
-        parts = [f"{p['name']}({p['code']}) {p['pct']:+.1f}%" for p in picks]
-        lines.append(f"  · {concept}: {' / '.join(parts)}")
+    # 二、自选股 (人工维护, 已补全名称/现价/形态分析)
+    lines.append(f"\n【二、自选股】")
+    if not human_watchlist:
+        lines.append(f"  （空 — 由你人工维护, 系统不再自动覆盖; 可在 data/watchlist.json 加入股票代码）")
+    else:
+        lines.append(f"  共 {len(human_watchlist)} 只 (名称/现价/形态分析):")
+        for i, w in enumerate(human_watchlist, 1):
+            if isinstance(w, dict):
+                name = w.get("name", w.get("code", "?"))
+                code = w.get("code", "")
+                price = w.get("price")
+                price_s = f" ¥{price}" if isinstance(price, (int, float)) else ""
+                cp = w.get("change_pct")
+                cp_s = f" {cp:+.2f}%" if isinstance(cp, (int, float)) else ""
+                stg = STAGE_LABELS.get(w.get("stage"), w.get("stage")) if w.get("stage") else "—"
+                score = w.get("score")
+                wr = w.get("win_rate")
+                wr_s = f" 成功率{wr*100:.0f}%" if isinstance(wr, (int, float)) else ""
+                rating = w.get("rating") or "—"
+                lines.append(f"  {i}. {name}({code}){price_s}{cp_s} | {stg} 评分{score}{wr_s} 评级{rating}")
+                if w.get("signals"):
+                    lines.append(f"     信号: {'、'.join(w['signals'])}")
+            else:
+                lines.append(f"  {i}. {w}")
+
+    # 二b、策略股票池 (机器维护, 每日 refresh 更新数值关卡 + 移动止损)
+    lines.append(f"\n【二b、策略股票池 ({len(pool_entries)} 只)】")
+    if not pool_entries:
+        lines.append(f"  （空 — 运行突破扫描后自动累积入池）")
+    else:
+        lines.append(f"  共 {len(pool_entries)} 只 (入选日 | 现价 | 涨幅 | 形态 | 评分 | 状态 | 买点 | 止损 | 止盈 | 来源):")
+        for e in pool_entries:
+            if e.get("exited"):
+                st = "已退出"
+            elif e.get("entered"):
+                st = "已建仓"
+            else:
+                st = "观察中"
+            stage_lbl = STAGE_LABELS.get(e.get("stage"), e.get("stage"))
+            price = e.get("price")
+            price_s = f" ¥{price}" if isinstance(price, (int, float)) else ""
+            cp = e.get("change_pct")
+            cp_s = f" {cp:+.2f}%" if isinstance(cp, (int, float)) else ""
+            reason = e.get("reason", "")
+            reason_s = f" | {reason}" if reason and "迁移" not in reason else ""
+            lines.append(
+                f"  · {e.get('name','')}({e['symbol']}){price_s}{cp_s} 入选{e.get('entry_date','')} "
+                f"| {stage_lbl} | 评分{e.get('score','')} | {st} "
+                f"| 买{e.get('buy_level','—')} 止损{e.get('stop_level','—')} 盈{e.get('tp_level','—')}"
+                f"{reason_s}")
 
     # 三、蒸馏策略精选
     lines.append(f"\n【三、蒸馏策略精选 ({rinfo['label']}, 大盘{regime})】")
@@ -468,6 +705,75 @@ def build_report(date_str: str, hotspots: list, watchlist_picks: list,
     return "\n".join(lines)
 
 
+def build_wechat_card(date_str, hotspots, pool_entries, breakthrough, regime):
+    """企微摘要卡片: markdown 卡片式(标题/加粗/引用块), 统一 ①②③④ 章节编号,
+    格式化不堆文字; 详细买卖计划见 HTML 周报。"""
+    b = breakthrough or {}
+    rg = b.get("regime", regime or "未知")
+    rdiff = b.get("regime_diff")
+    rlabel = b.get("strategy_label", "")
+    diff_s = f"{rdiff:+.2f}%" if isinstance(rdiff, (int, float)) else "—"
+    is_bear = (rg == "空头")
+    count = b.get("count", 0)
+    dot = "🔴" if is_bear else ("🟢" if rg == "多头" else "🟡")
+
+    L = [f"## 📊 本周热点选股 · {date_str}"]
+
+    # ① 大盘状态与策略
+    L.append("")
+    L.append("**① 大盘状态**")
+    L.append(f"> {dot} 上证 **{rg}** (MA20-MA60 {diff_s})")
+    L.append(f"> 策略: {rlabel or '—'}")
+    if is_bear:
+        L.append(f"> ⚠️ 空头排列 → 空仓观望, 候选池 {count} 只全部放弃")
+
+    # ② 本周热点板块
+    L.append("")
+    L.append(f"**② 本周热点 Top{len(hotspots)}**")
+    for i, c in enumerate(hotspots, 1):
+        amt = c.get("amount")
+        amt_s = f"{amt / 1e8:.1f}亿" if amt else "0"
+        cp = c.get("change_pct") or 0
+        arrow = "▲" if cp >= 0 else "▼"
+        lp = c.get("leader_pct")
+        lead = ""
+        if c.get("leader"):
+            lp_s = f" {lp:+.1f}%" if isinstance(lp, (int, float)) else ""
+            lead = f" ｜龙头 {c['leader']}{lp_s}"
+        L.append(f"> {i}. {c['name']}  {arrow}{abs(cp):.2f}%  💰{amt_s}{lead}")
+
+    # ③ 蒸馏策略精选 (空头不产出)
+    final = b.get("final", []) or []
+    L.append("")
+    if is_bear:
+        L.append("**③ 蒸馏精选**")
+        L.append("> 🛑 空头观望, 本期不出股")
+    elif final:
+        L.append(f"**③ 蒸馏精选 {len(final)} 只** (候选 {count})")
+        for i, c in enumerate(final[:5], 1):
+            wr = c.get("win_rate")
+            wr_s = f"  成功率{wr * 100:.0f}%" if isinstance(wr, (int, float)) else ""
+            L.append(f"> {i}. {c['name']}({c['symbol']})  {c['score']}分{wr_s}")
+        if len(final) > 5:
+            L.append(f"> …另 {len(final) - 5} 只见 HTML 周报")
+    else:
+        L.append("**③ 蒸馏精选**")
+        L.append(f"> 候选池 {count} 只均未通过当前策略")
+
+    # ④ 策略股票池摘要
+    pe = pool_entries or []
+    n_total = len(pe)
+    n_entered = sum(1 for e in pe if e.get("entered") and not e.get("exited"))
+    n_exited = sum(1 for e in pe if e.get("exited"))
+    n_watch = n_total - n_entered - n_exited
+    L.append("")
+    L.append(f"**④ 策略池 {n_total} 只**")
+    L.append(f"> 已建仓 {n_entered} ｜观察中 {n_watch} ｜已退出 {n_exited}")
+    L.append("")
+    L.append("📄 完整买卖计划见 HTML 周报")
+    return "\n".join(L)
+
+
 def main():
     for _s in (sys.stdout, sys.stderr):
         try:
@@ -509,8 +815,35 @@ def main():
     breakthrough = enrich_candidates(breakthrough,
                                      runup_days=args.runup_days,
                                      runup_pct=args.runup_pct)
-    # 2(延后). 自选股 = 策略候选池 (热点板块内按形态识别选出, 跨板块共振保留)
-    watchlist_picks = build_watchlist_from_candidates(breakthrough, verbose=True)
+    # 2(延后). 策略精选 → 加入股票池(累积+TTL+去重), 不再覆盖人工自选股
+    from plans.stock_pool import add_entries as _pool_add, load_pool as _pool_load
+    final_picks = breakthrough.get("final", [])
+    pool_new = []
+    for c in final_picks:
+        sym = _bare(c.get("symbol", ""))
+        if not sym:
+            continue
+        cons = c.get("concepts") or ([c.get("concept")] if c.get("concept") else [])
+        pool_new.append({
+            "symbol": sym,
+            "name": c.get("name", sym),
+            "concepts": cons,
+            "reason": "热点突破精选(%s)" % regime,
+        })
+    if pool_new:
+        _pool_add(pool_new, reason_default="热点突破精选(%s)" % regime)
+        print(f"    策略精选 {len(pool_new)} 只已加入股票池(累积+TTL+去重)", flush=True)
+    # 人工自选股(只读, 系统不写) → 补全名称/现价/形态分析
+    try:
+        _raw_wl = json.load(open(WATCHLIST_PATH, encoding="utf-8")) or []
+    except Exception:
+        _raw_wl = []
+    human_watchlist = enrich_watchlist(_raw_wl, verbose=args is not None)
+    if human_watchlist:
+        print(f"    自选股 {len(human_watchlist)} 只已补全名称/现价/形态分析", flush=True)
+    # 股票池(供报告展示) → 注入实时 当前价/当日涨幅
+    pool_entries = _pool_load().get("entries", [])
+    enrich_pool_entries(pool_entries, verbose=args is not None)
 
     print(f"    选入 {breakthrough.get('count', 0)} 只, "
           f"剔除前期大涨不追 {breakthrough.get('excluded_count', 0)} 只 "
@@ -537,22 +870,25 @@ def main():
           f"精选 {len(final)} 只 (候选池 {breakthrough.get('count',0)} 只)", flush=True)
 
     # 4. 报告
-    report = build_report(date_str, hotspots, watchlist_picks, breakthrough, regime=regime)
+    report = build_report(date_str, hotspots, human_watchlist, pool_entries, breakthrough, regime=regime)
+
+    # 4a. 企微摘要卡片 (统一数据源: 定时推送与 bot 路径共用同一张卡片)
+    card = build_wechat_card(date_str, hotspots, pool_entries, breakthrough, regime)
+    # 用标记块输出到 stdout, 供 wecom_bot(--no-push 路径)提取 → 微信只推卡片, 不推全文报告
+    print("<<<WECHAT_CARD_START>>>")
+    print(card)
+    print("<<<WECHAT_CARD_END>>>")
 
     # 4b. HTML 报告 (统一机制: core/html_renderer.render + HTML_REPORT:<path> 约定)
     if args.html:
         try:
             from core.html_renderer import render
-            by_concept = {}
-            for p in watchlist_picks:
-                by_concept.setdefault(p["concept"], []).append(p)
-            watchlist_grouped = [{"concept": k, "picks": v} for k, v in by_concept.items()]
             html_path = render(
                 {
                     "date": date_str,
                     "hotspots": hotspots,
-                    "watchlist": watchlist_picks,
-                    "watchlist_grouped": watchlist_grouped,
+                    "human_watchlist": human_watchlist,
+                    "stock_pool": pool_entries,
                     "breakthrough": breakthrough,
                 },
                 "weekly_hotspot_report",
@@ -574,7 +910,8 @@ def main():
         out = {
             "date": date_str,
             "hotspots": hotspots,
-            "watchlist": watchlist_picks,
+            "human_watchlist": human_watchlist,
+            "stock_pool": pool_entries,
             "breakthrough": breakthrough,
         }
         print(json.dumps(out, ensure_ascii=False, indent=2))
@@ -585,12 +922,13 @@ def main():
         print(f"\n[REPORT] 报告已保存: {report_path}", flush=True)
 
     # 5. 推送微信 (仅经智能机器人 aibot 通道, 与用户沟通)
+    #    企微只推格式化摘要卡片, 详细买卖计划留在 HTML 周报 / 落盘文件
     if not args.no_push:
         try:
             from notify.wecom_bot import push_markdown_via_bot
-            ok = push_markdown_via_bot(report)
+            ok = push_markdown_via_bot(card)
             if ok:
-                print("\n[AIBOT] 已推送报告到企业微信智能机器人", flush=True)
+                print("\n[AIBOT] 已推送摘要卡片到企业微信智能机器人", flush=True)
             else:
                 print("\n[AIBOT] 推送未成功 (详见上方错误), 报告已落盘。",
                       file=sys.stderr, flush=True)

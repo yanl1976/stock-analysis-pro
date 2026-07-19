@@ -231,7 +231,7 @@ TASKS = [
     },
     {
         "name": "热点选股(突破扫描)",
-        "cmd": ["python", "core/cli.py", "breakthrough", "--concepts", "10", "--per", "15"],
+        "cmd": ["python", "core/cli.py", "breakthrough", "--concepts", "10", "--per", "15", "--to-pool"],
         "time": "16:00",
         "interval": "每个交易日",
         "weekday": None,
@@ -252,6 +252,18 @@ TASKS = [
         "notify": True,
         "enabled": True,
         "desc": "遍历 data/watchlist.json 全部自选股, 多维评分(技术/基本/资金/舆情)",
+    },
+    {
+        "name": "股票池refresh",
+        "cmd": ["python", "plans/stock_pool.py", "--refresh", "--expire"],
+        "time": "16:30",
+        "interval": "每个交易日",
+        "weekday": None,
+        "trading_day_only": True,
+        "timeout": 600,
+        "notify": True,
+        "enabled": True,
+        "desc": "每日收盘后用最新K线重算股票池数值关卡+移动止损, 清理过期条目(TTL)",
     },
     {
         "name": "每日复盘",
@@ -356,6 +368,10 @@ def save_state(state: dict):
 # ---------------------------------------------------------------------------
 # 企微通知(可选, 未配置机器人则静默跳过)
 # ---------------------------------------------------------------------------
+# intraday_watch 输出的分组分隔符: 据此把"策略池"与"自选"拆成两条企微消息
+SPLIT_SENTINEL = "<<<SPLIT>>>"
+
+
 def notify(title: str, body: str):
     try:
         import asyncio
@@ -368,13 +384,24 @@ def notify(title: str, body: str):
     if not chat_id:
         return
 
+    # 分群: 若含分隔符, 拆成两段分别推送(策略池 / 自选)
+    if SPLIT_SENTINEL in body:
+        parts = body.split(SPLIT_SENTINEL, 1)
+        groups = [
+            ("【策略池】" + title, parts[0]),
+            ("【自选】" + title, parts[1]),
+        ]
+    else:
+        groups = [(title, body)]
+
     async def _push():
         client = build_client()
         await client.connect()
         await asyncio.sleep(2)
-        full = f"## 📅 {title}\n" + (body or "(无输出)")
-        for ch in _split_by_bytes(full):
-            await client.send_message(chat_id, {"msgtype": "markdown", "markdown": {"content": ch}})
+        for g_title, g_body in groups:
+            full = f"## 📅 {g_title}\n" + (g_body.strip() or "(无输出)")
+            for ch in _split_by_bytes(full):
+                await client.send_message(chat_id, {"msgtype": "markdown", "markdown": {"content": ch}})
         client.disconnect()
 
     try:

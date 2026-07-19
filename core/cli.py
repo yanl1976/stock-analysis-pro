@@ -90,6 +90,8 @@ def main():
     parser.add_argument("--per", type=int, default=15, help="突破扫描: 每版块成分股数")
     parser.add_argument("--sector", help="突破扫描: 指定单一版块名称")
     parser.add_argument("--stage-filter", help="突破扫描: 仅保留某状态(about_to_launch/breakout/...)")
+    parser.add_argument("--to-pool", action="store_true",
+                        help="突破扫描: 把精选(final)累积加入策略股票池(data/stock_pool.json)")
     parser.add_argument("--action", choices=["add", "rm", "list", "update"], help="Portfolio action")
     parser.add_argument("--name", help="Portfolio stock name")
     parser.add_argument("--cost", type=float, help="Portfolio cost")
@@ -250,6 +252,25 @@ def main():
                 print(json.dumps(data, ensure_ascii=False, indent=2))
             else:
                 print(fmt_breakthrough(data))
+            # 累积加入策略股票池 (每日扫描用 --to-pool 触发)
+            if args.to_pool:
+                from plans.stock_pool import add_entries
+                finals = data.get("final") or data.get("candidates") or []
+                new_entries = []
+                for c in finals:
+                    sym = str(c.get("symbol", "")).strip()
+                    if not sym:
+                        continue
+                    cons = c.get("concepts") or ([c.get("concept")] if c.get("concept") else [])
+                    new_entries.append({
+                        "symbol": sym,
+                        "name": c.get("name", sym),
+                        "concepts": cons,
+                        "reason": "突破扫描精选",
+                    })
+                if new_entries:
+                    added = add_entries(new_entries, reason_default="突破扫描精选")
+                    print(f"[POOL] 已加入股票池 {len(new_entries)} 只 (新增 {added})")
 
         elif args.command == "portfolio":
             from config import load_config

@@ -12,10 +12,30 @@
 {% set rinfo = {'多头':{'label':'顺势低吸(回调+低波)','color':'var(--green)'},'震荡':{'label':'高胜率共振','color':'var(--yellow)'},'空头':{'label':'空仓观望','color':'var(--red)'},'未知':{'label':'未知(按震荡)','color':'var(--text-muted)'}}.get(regime, {'label':'未知','color':'var(--text-muted)'}) %}
 {% set stage_cls = {'about_to_launch':'var(--green)','breakout':'var(--accent)','running':'var(--yellow)','platform':'var(--blue)','trending':'var(--text-muted)','falling':'var(--red)','unknown':'var(--text-muted)'} %}
 {% set stage_label = {'platform':'🟦 平台整理','about_to_launch':'🟢 即将启动','breakout':'🚀 突破启动','running':'🔥 已主升(慎追)','falling':'📉 下跌','trending':'📈 趋势中','unknown':'❓ 未知'} %}
+{% set rate_cls = {'重点':'var(--green)','关注':'var(--accent)','观察':'var(--yellow)','暂避':'var(--red)'} %}
+
+{% macro watch_card(w) %}
+<div class="card" style="margin-bottom:8px;">
+  <div style="display:flex;align-items:center;gap:8px;">
+    <span style="flex:1;font-size:14px;font-weight:700;">{{ w.name }}<span style="font-size:11px;color:var(--text-muted);font-weight:400;"> ({{ w.code }})</span></span>
+    {% if w.price is not none %}<span style="font-size:14px;font-weight:600;margin-right:6px;" class="{{ pct_color(w.change_pct) if w.change_pct is not none else '' }}">¥{{ w.price }}</span>{% endif %}
+    {% if w.change_pct is not none %}<span style="font-size:14px;font-weight:600;margin-right:8px;" class="{{ pct_color(w.change_pct) }}">{{ fmt_pct(w.change_pct) }}</span>{% endif %}
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+    {% if w.rating %}<span style="font-size:11px;color:var(--text-muted);">综合评级: <b style="color:{{ rate_cls.get(w.rating,'var(--text-muted)') }};">{{ w.rating }}</b></span>{% endif %}
+    {% if w.stage %}<span style="font-size:11px;padding:2px 8px;border-radius:10px;background:{{ stage_cls.get(w.stage,'var(--text-muted)') }}22;color:{{ stage_cls.get(w.stage,'var(--text-muted)') }};font-weight:600;">状态: {{ stage_label.get(w.stage, w.stage) }}</span>{% endif %}
+    {% if w.score is not none %}<span style="font-size:12px;font-weight:700;color:{% if w.score>=70 %}var(--green){% elif w.score>=50 %}var(--accent){% elif w.score>=30 %}var(--yellow){% else %}var(--red){% endif %};">评分{{ w.score }}</span>{% endif %}
+    {% if w.win_rate is defined and w.win_rate is not none %}<span style="font-size:11px;color:var(--text-muted);">成功率{{ '%.0f'|format(w.win_rate*100) }}%</span>{% endif %}
+  </div>
+  {% if w.signals %}<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">信号: {{ w.signals|join(' / ') }}</div>{% endif %}
+  {% if w.buy_point %}<div style="font-size:12px;padding:2px 0 2px 0;">📍 买点: {{ w.buy_point }}</div>{% endif %}
+  {% if w.stop_loss is not none %}<div style="font-size:12px;padding:1px 0 2px 0;">🛡 止损 ¥{{ w.stop_loss }} ({{ w.stop_pct }}%) · 🎯 目标 ¥{{ w.take_profit }}</div>{% endif %}
+</div>
+{% endmacro %}
 
 <div class="header">
   <h1>📊 本周热点选股报告</h1>
-  <div class="subtitle">{{ data.date }} · 热点 {{ data.hotspots|length }} 板块 · 自选 {{ data.watchlist|length }} 只 · 突破候选 {{ candidates|length }} 只</div>
+  <div class="subtitle">{{ data.date }} · 热点 {{ data.hotspots|length }} 板块 · 自选 {{ data.human_watchlist|length }} 只 · 突破候选 {{ candidates|length }} 只</div>
 </div>
 
 {# 〇、大盘行情状态与策略路由 #}
@@ -49,17 +69,56 @@
   {% endfor %}
 </div>
 
-{# 二、自选股更新 #}
+{# 二、自选股 (人工维护, 已补全名称/现价/形态分析) #}
 <div class="section">
-  <div class="section-title"><span class="icon">⭐</span> 自选股更新 (每板块取涨幅前 2)</div>
-  {% for g in data.watchlist_grouped %}
-  <div class="card">
-    <div style="font-weight:700;margin-bottom:4px;">{{ g.concept }}</div>
-    <div style="font-size:13px;color:var(--text-muted);">
-      {% for p in g.picks %}<span style="margin-right:14px;">{{ p.name }}({{ p.code }}) <b class="{{ pct_color(p.pct) }}">{{ fmt_pct(p.pct) }}</b></span>{% endfor %}
-    </div>
+  <div class="section-title"><span class="icon">⭐</span> 自选股</div>
+  {% if data.human_watchlist %}
+    {% for w in data.human_watchlist %}{{ watch_card(w) }}{% endfor %}
+  {% else %}
+  <div class="card" style="color:var(--text-muted);">（空 — 由你人工维护, 系统不再自动覆盖; 可在 data/watchlist.json 加入股票代码）</div>
+  {% endif %}
+</div>
+
+{# 二b、策略股票池 (机器维护, 卡片式, 评分<50 自动折叠) #}
+{% macro pool_card(e) %}
+<div class="card" style="margin-bottom:8px;">
+  <div style="display:flex;align-items:center;gap:8px;">
+    <span style="flex:1;font-size:14px;font-weight:700;">{{ e.name }}<span style="font-size:11px;color:var(--text-muted);font-weight:400;"> ({{ e.symbol }})</span></span>
+    {% if e.price is not none %}<span style="font-size:14px;font-weight:600;margin-right:6px;">¥{{ e.price }}</span>{% endif %}
+    {% if e.change_pct is not none %}<span style="font-size:14px;font-weight:600;margin-right:8px;" class="{{ pct_color(e.change_pct) }}">{{ fmt_pct(e.change_pct) }}</span>{% endif %}
+    <span style="font-size:12px;font-weight:700;padding:2px 9px;border-radius:10px;white-space:nowrap;{% if e.score is not none and e.score >= 70 %}background:rgba(63,185,80,0.15);color:var(--green);{% elif e.score is not none and e.score >= 50 %}background:rgba(88,166,255,0.15);color:var(--accent);{% elif e.score is not none and e.score >= 30 %}background:rgba(210,153,34,0.15);color:var(--yellow);{% else %}background:rgba(248,81,73,0.15);color:var(--red);{% endif %}">{{ e.score if e.score is not none else '—' }}分</span>
+    {% if e.exited %}<span style="font-size:11px;color:var(--text-muted);">已退出</span>
+    {% elif e.entered %}<span style="font-size:11px;padding:1px 8px;border-radius:8px;background:rgba(63,185,80,0.15);color:var(--green);font-weight:600;white-space:nowrap;">已建仓</span>
+    {% else %}<span style="font-size:11px;color:var(--text-muted);">观察中</span>{% endif %}
   </div>
-  {% endfor %}
+  <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">{{ stage_label.get(e.stage, e.stage) or '—' }} · 入选{{ e.entry_date or '—' }}{% set _reason = e.reason if e.reason and '迁移' not in e.reason else '' %}{% if _reason %} · {{ _reason }}{% endif %}</div>
+  <div style="display:flex;gap:6px;margin-top:6px;font-size:12px;">
+    <span style="flex:1;background:var(--bg);border-radius:6px;padding:4px 4px;text-align:center;">买点 <b class="up">{{ e.buy_level if e.buy_level is not none else '—' }}</b></span>
+    <span style="flex:1;background:var(--bg);border-radius:6px;padding:4px 4px;text-align:center;">止损 <b class="down">{{ e.stop_level if e.stop_level is not none else '—' }}</b></span>
+    <span style="flex:1;background:var(--bg);border-radius:6px;padding:4px 4px;text-align:center;">止盈 <b class="up">{{ e.tp_level if e.tp_level is not none else '—' }}</b></span>
+  </div>
+</div>
+{% endmacro %}
+<div class="section">
+  <div class="section-title"><span class="icon">🤖</span> 策略股票池 ({{ data.stock_pool|length }} 只)</div>
+  {% if data.stock_pool %}
+  {% set high = [] %}{% set low = [] %}
+  {% for e in data.stock_pool %}{% if e.score is not none and e.score >= 50 %}{% set _ = high.append(e) %}{% else %}{% set _ = low.append(e) %}{% endif %}{% endfor %}
+  {% for e in high %}{{ pool_card(e) }}{% endfor %}
+  {% if low %}
+  <details class="fold">
+    <summary>
+      <span>低评分 (&lt;50) · 共 {{ low|length }} 只 — 点击展开</span>
+      <span class="fold-arrow">▾</span>
+    </summary>
+    <div class="fold-body">
+      {% for e in low %}{{ pool_card(e) }}{% endfor %}
+    </div>
+  </details>
+  {% endif %}
+  {% else %}
+  <div class="card" style="color:var(--text-muted);">（空 — 运行突破扫描后自动累积入池）</div>
+  {% endif %}
 </div>
 
 {# 三、蒸馏策略精选 #}
@@ -109,7 +168,6 @@
     <div style="padding:12px;color:var(--red);">🛑 空仓观望: 本期不给出买入计划。空头排列下任何买点胜率均不足, 持币等待多头信号。</div>
   {% else %}
   <div style="font-size:12px;color:var(--text-muted);padding:0 12px 8px;">评级: 重点 &gt; 关注 &gt; 观察 &gt; 暂避 · 仓位为单标的上限建议{% if regime == '震荡' %} (震荡薄边已按0.6×降仓){% endif %} · 破止损离场 / 触目标止盈 / 盈利&gt;8%上移止损锁利</div>
-  {% set rate_cls = {'重点':'var(--green)','关注':'var(--accent)','观察':'var(--yellow)','暂避':'var(--red)'} %}
   {% for c in final[:15] %}
   {% set rc = rate_cls.get(c.rating, 'var(--text-muted)') %}
   <div class="card" style="margin-bottom:8px;">
