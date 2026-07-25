@@ -103,6 +103,7 @@
   宏观分析            08:30            每个交易日   是        是     国际+国内+涨停池 → 综合研判(盘前定调)
   盘中自选异动监控    09:30-11:30/13:00-15:00  盘中每15分  是     是     盘中扫描自选股+大盘, 异动推企微
   盘中热点选股(突破扫描) 09:30-11:30/13:00-15:00  盘中每15分  是     是     盘中跑突破扫描, 实时价筛选突破/即将启动个股推企微
+  盘中S14选股(三角形突破) 14:45         盘中           是    是     盘中用S14同源detect_triangle扫全市场三角形突破, 实时价判突破触发/即将突破推企微
   概念板块扫描        15:45            每个交易日   是        是     收盘后拉概念板块涨幅榜单
   热点选股(突破扫描)  16:00            每个交易日   是        是     热点板块成分股形态识别选股
   自选分析            16:30            每个交易日   是        是     遍历 watchlist.json 多维评分
@@ -136,13 +137,23 @@ import time
 import argparse
 import subprocess
 import datetime
+import re
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
+# 强制 stdout/stderr 使用 UTF-8, 避免 Windows 控制台默认 gbk 无法编码 ▶/🔥 等字符
+# (log() 与前台 --run-once 直连 PowerShell 控制台时会触发 UnicodeEncodeError 崩溃)
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 DATA_DIR = os.path.join(BASE_DIR, "data")
 LOG_PATH = os.path.join(DATA_DIR, "scheduler.log")
 STATE_PATH = os.path.join(DATA_DIR, "scheduler_state.json")
+NOTIFY_HTML_DIR = os.path.join(DATA_DIR, "notify_html")
 
 # ---------------------------------------------------------------------------
 # 交易日判断: 周一~周五 且 不在法定节假日集合
@@ -219,7 +230,7 @@ TASKS = [
     },
     {
         "name": "概念板块扫描",
-        "cmd": ["python", "core/cli.py", "concept", "--stage", "list", "--top", "10"],
+        "cmd": ["python", "core/cli.py", "concept", "--stage", "list", "--top", "10", "--html"],
         "time": "15:45",
         "interval": "每个交易日",
         "weekday": None,
@@ -228,6 +239,18 @@ TASKS = [
         "notify": True,
         "enabled": True,
         "desc": "收盘后拉概念板块涨幅榜单(快, 纯 requests)",
+    },
+    {
+        "name": "概念热度追踪",
+        "cmd": ["python", "plans/concept_tracker.py", "--save"],
+        "time": "16:00",
+        "interval": "每个交易日",
+        "weekday": None,
+        "trading_day_only": True,
+        "timeout": 120,
+        "notify": False,
+        "enabled": True,
+        "desc": "每日概念热度追踪: 跨日对比榜单, 计算连续天数/排名变化/热度标签(持续发酵/新兴/衰减等)",
     },
     {
         "name": "热点选股(突破扫描)",
@@ -243,7 +266,7 @@ TASKS = [
     },
     {
         "name": "自选分析",
-        "cmd": ["python", "core/cli.py", "analyze-all", "--no-browser"],
+        "cmd": ["python", "core/cli.py", "analyze-all", "--no-browser", "--html"],
         "time": "16:30",
         "interval": "每个交易日",
         "weekday": None,
@@ -267,7 +290,7 @@ TASKS = [
     },
     {
         "name": "每日复盘",
-        "cmd": ["python", "core/cli.py", "review"],
+        "cmd": ["python", "core/cli.py", "review", "--html"],
         "time": "17:00",
         "interval": "每个交易日",
         "weekday": None,
@@ -276,6 +299,18 @@ TASKS = [
         "notify": True,
         "enabled": True,
         "desc": "全市场复盘报告(指数/板块/情绪/涨跌家数)",
+    },
+    {
+        "name": "每日决策简报",
+        "cmd": ["python", "core/cli.py", "decision", "--html", "--no-browser"],
+        "time": "17:15",
+        "interval": "每个交易日",
+        "weekday": None,
+        "trading_day_only": True,
+        "timeout": 300,
+        "notify": True,
+        "enabled": True,
+        "desc": "决策闭环: 从股票池提炼 买入/卖出/持仓跟踪/评级变化 精简操作清单(主推送)",
     },
     {
         "name": "周热点回测",
@@ -330,6 +365,18 @@ TASKS = [
         "enabled": True,
         "desc": "盘中每15分跑突破扫描(热点板块→成分股→形态识别), 盘中实时价筛选突破/即将启动个股推企微",
     },
+    {
+        "name": "盘中S14选股(三角形突破)",
+        "cmd": ["python", "plans/intraday_select.py", "--top", "15"],
+        "time": "14:45",
+        "interval": "14:45",
+        "weekday": None,
+        "trading_day_only": True,
+        "timeout": 300,
+        "notify": True,
+        "enabled": True,
+        "desc": "收盘前(14:45)用 S14 同源 detect_triangle 扫全市场对称三角形突破(候选按日缓存), 实时价判突破触发/即将突破, 推企微",
+    },
 ]
 
 
@@ -372,10 +419,83 @@ def save_state(state: dict):
 SPLIT_SENTINEL = "<<<SPLIT>>>"
 
 
+def _find_html_report(body: str):
+    """若任务输出自带 HTML 报告(HTML_REPORT:<path> 约定), 直接复用, 不重复生成。"""
+    for line in (body or "").splitlines():
+        if line.startswith("HTML_REPORT:"):
+            p = line.split("HTML_REPORT:", 1)[1].strip()
+            if p and os.path.exists(p):
+                return p
+    return None
+
+
+def _build_card(title: str, body: str) -> str:
+    """构造企微摘要卡片(markdown, 简短): 优先用脚本自带卡片标记, 否则取前若干行预览。"""
+    # 1) 脚本显式卡片标记 <<<WECHAT_CARD_START/END>>>
+    if "<<<WECHAT_CARD_START>>>" in body and "<<<WECHAT_CARD_END>>>" in body:
+        seg = body.split("<<<WECHAT_CARD_START>>>", 1)[1]
+        inner = seg.split("<<<WECHAT_CARD_END>>>", 1)[0].strip()
+        if inner:
+            return f"## 📅 {title}\n\n{inner}"
+    # 2) 去除 HTML_REPORT 标记行, 取前 15 个非空行作为预览
+    lines = [l for l in (body or "").splitlines() if not l.startswith("HTML_REPORT:")]
+    clean = "\n".join(lines).strip()
+    if not clean:
+        return f"## 📅 {title}\n\n✅ 已完成，完整明细见附件 HTML"
+    preview = "\n".join([l for l in clean.splitlines() if l.strip()][:15])
+    return (f"## 📅 {title}\n\n"
+            f"{preview}\n\n"
+            f"📎 完整明细见附件 HTML 文件")
+
+
+def _render_html_report(title: str, body: str):
+    """把纯文本任务输出渲染成 HTML 文件(含完整详细内容), 返回路径。
+
+    统一走项目 HTML 报告体系(core.html_renderer + templates/base.html 暗色卡片主题),
+    使用通用文本模板 task_report.html, 而非另起炉灶手搓样式。
+    """
+    import datetime as _dt
+    try:
+        os.makedirs(NOTIFY_HTML_DIR, exist_ok=True)
+        ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe = re.sub(r"\W+", "_", title)[:40] or "task"
+
+        # 摘要: 复用脚本自带卡片标记内容(若有)
+        summary = ""
+        if "<<<WECHAT_CARD_START>>>" in body and "<<<WECHAT_CARD_END>>>" in body:
+            seg = body.split("<<<WECHAT_CARD_START>>>", 1)[1]
+            summary = seg.split("<<<WECHAT_CARD_END>>>", 1)[0].strip()
+
+        # 完整明细: 去掉内部标记行/分隔符, 保留纯净文本
+        clean = "\n".join(
+            l for l in (body or "").splitlines()
+            if not l.startswith("HTML_REPORT:")
+        )
+        clean = clean.replace("<<<WECHAT_CARD_START>>>", "").replace("<<<WECHAT_CARD_END>>>", "")
+        clean = clean.replace(SPLIT_SENTINEL, "\n").strip() or "(无输出)"
+
+        from core.html_renderer import render
+        data = {
+            "title": title,
+            "time": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "summary": summary,
+            "body": clean,
+        }
+        return render(
+            data, "task_report",
+            output_dir=NOTIFY_HTML_DIR,
+            filename=f"{safe}_{ts}.html",
+        )
+    except Exception as e:
+        log(f"[NOTIFY] HTML 生成失败({title}): {e}")
+        return None
+
+
 def notify(title: str, body: str):
+    """企微通知: 发【摘要卡片】+ 附【HTML 文件(完整详细内容)】, 不再堆文字。"""
     try:
         import asyncio
-        from notify.wecom_bot import build_client, load_chat_id, _split_by_bytes, is_enabled
+        from notify.wecom_bot import build_client, load_chat_id, is_enabled, send_file_on_client
     except Exception:
         return
     if not is_enabled():
@@ -384,7 +504,10 @@ def notify(title: str, body: str):
     if not chat_id:
         return
 
-    # 分群: 若含分隔符, 拆成两段分别推送(策略池 / 自选)
+    # HTML: 优先复用脚本自带报告, 否则由完整输出渲染
+    html_path = _find_html_report(body) or _render_html_report(title, body)
+
+    # 分群: 若含分隔符, 拆成两段分别推卡片(策略池 / 自选)
     if SPLIT_SENTINEL in body:
         parts = body.split(SPLIT_SENTINEL, 1)
         groups = [
@@ -399,9 +522,10 @@ def notify(title: str, body: str):
         await client.connect()
         await asyncio.sleep(2)
         for g_title, g_body in groups:
-            full = f"## 📅 {g_title}\n" + (g_body.strip() or "(无输出)")
-            for ch in _split_by_bytes(full):
-                await client.send_message(chat_id, {"msgtype": "markdown", "markdown": {"content": ch}})
+            card = _build_card(g_title, g_body)
+            await client.send_message(chat_id, {"msgtype": "markdown", "markdown": {"content": card}})
+        if html_path and os.path.exists(html_path):
+            await send_file_on_client(client, html_path, chat_id)
         client.disconnect()
 
     try:
@@ -457,9 +581,15 @@ def run_task(t: dict):
             out = func() or ""
             rc = 0
         else:
+            # 强制子进程 UTF-8, 避免 Windows 控制台默认 gbk 导致打印中文/emoji 时
+            # UnicodeEncodeError 崩溃(如 宏观分析 的 '🌐'), 进而使 notify 拿到错误内容
+            env = dict(os.environ)
+            env["PYTHONUTF8"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
             proc = subprocess.run(
                 t["cmd"], cwd=BASE_DIR, capture_output=True, text=True,
-                timeout=t.get("timeout", 3600), env=os.environ,
+                timeout=t.get("timeout", 3600), env=env,
+                encoding="utf-8", errors="replace",
             )
             out = (proc.stdout or "") + (proc.stderr or "")
             rc = proc.returncode
@@ -469,7 +599,12 @@ def run_task(t: dict):
             for ln in tail.splitlines()[-15:]:
                 log(f"    └ {ln}")
         if t.get("notify"):
-            notify(t["name"], tail)
+            # 子任务可输出 `#NO_PUSH#` sentinel 表示"无合适入选/无内容可推",
+            # 例如 S14 选股当日无三角形候选/无突破触发时, 跳过企微推送避免空报告轰炸
+            if "#NO_PUSH#" in out:
+                log(f"  ⊘ 跳过推送: {t['name']} (输出含 #NO_PUSH#, 无合适入选)")
+            else:
+                notify(t["name"], out)
         return rc
     except subprocess.TimeoutExpired:
         log(f"✗ 超时: {t['name']} (>{t.get('timeout',3600)}s)")

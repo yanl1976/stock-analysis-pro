@@ -152,6 +152,13 @@ def run(target_count=10, verbose=True, use_cache=True, stage='all'):
         }
         _cache_set(list_cache_key, list_out)
 
+        # ── 概念热度追踪: 每次跑完 list 阶段, 保存当天榜单快照 ──
+        try:
+            from plans.concept_tracker import save_daily_snapshot
+            save_daily_snapshot()
+        except Exception:
+            pass  # 首次可能 board_pool.json 不存在, 不影响主流程
+
         if stage == 'list':
             return list_out
 

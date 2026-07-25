@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}{{ data.get('title', '定时任务') }}{% endblock %}
+{% block body %}
+{# ===== HEADER ===== #}
+<div class="header">
+  <h1>📅 {{ data.get('title', '定时任务') }}</h1>
+  <div class="subtitle">{{ data.get('time', '') }}</div>
+</div>
+
+{# ===== 摘要(可选): 脚本自带卡片标记 <<<WECHAT_CARD>>> 内容 ===== #}
+{% set summary = data.get('summary', '') %}
+{% if summary %}
+<div class="section">
+  <div class="section-title"><span class="icon">📌</span> 摘要</div>
+  <div style="padding:10px 16px 14px;font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-word;">{{ summary }}</div>
+</div>
+{% endif %}
+
+{# ===== 完整输出 ===== #}
+<div class="section">
+  <div class="section-title"><span class="icon">📄</span> 完整明细</div>
+  <pre style="margin:0;padding:14px 16px;background:transparent;color:var(--text);
+              font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Microsoft YaHei',monospace;
+              font-size:12.5px;line-height:1.7;white-space:pre-wrap;word-break:break-word;
+              border-top:1px solid var(--card-border);">{{ data.get('body', '') }}</pre>
+</div>
+
+{# ===== FOOTER ===== #}
+<div class="footer">
+  Stock Analysis Pro · 定时任务通知 · {{ data.get('time', '') }}<br>
+  数据仅供参考，不构成投资建议
+</div>
+{% endblock %}

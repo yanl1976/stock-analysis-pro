@@ -218,6 +218,7 @@ def refresh_stock_pool(verbose: bool = True) -> int:
     pool = load_pool()
     today = _today()
     updated = 0
+    rating_order = {"暂避": 0, "观察": 1, "关注": 2, "推荐": 3}
     for e in pool["entries"]:
         if e.get("exited"):
             continue
@@ -225,6 +226,18 @@ def refresh_stock_pool(verbose: bool = True) -> int:
         lvl = _compute_levels(sym)
         if not lvl or lvl.get("error"):
             continue
+        # ── 评级变化跟踪(供决策简报"评级变化提醒"): 覆盖前记录旧评级/评分 ──
+        old_rating = e.get("rating")
+        old_score = e.get("score")
+        new_rating = lvl.get("rating")
+        new_score = lvl.get("score")
+        if old_rating and new_rating and old_rating != new_rating:
+            e["prev_rating"] = old_rating
+            e["prev_score"] = old_score
+            e["rating_change"] = ("up"
+                                  if rating_order.get(new_rating, 0) > rating_order.get(old_rating, 0)
+                                  else "down")
+            e["rating_change_date"] = today
         # 移动止损: max(初始止损, 入选以来最高价*(1-trailing_pct))
         hh = e.get("highest_since_entry") or lvl.get("price") or 0
         try:
@@ -264,6 +277,26 @@ def refresh_stock_pool(verbose: bool = True) -> int:
             "last_refresh": today,
         })
         updated += 1
+
+    # ── 概念热度标签传播: 每只股票继承其所属概念的最优先热度标签 ──
+    try:
+        from plans.concept_tracker import get_stock_hot_type, compute_heat_report
+        heat_report = compute_heat_report()
+        for e in pool["entries"]:
+            if e.get("exited"):
+                continue
+            e["hot_type"] = get_stock_hot_type(e.get("concepts", []))
+    except Exception:
+        pass  # tracker 未就绪时不影响主流程
+
+    # ── 自动清理暂避股票(非持仓): 形态转弱的不留噪音 ──
+    before_count = len(pool["entries"])
+    pool["entries"] = [e for e in pool["entries"]
+                       if e.get("exited") or e.get("entered") or e.get("rating") not in ("暂避",)]
+    removed = before_count - len(pool["entries"])
+    if removed > 0 and verbose:
+        print(f"  ✓ 清理暂避(非持仓): 移除 {removed} 只, 保留 {len(pool['entries'])} 只")
+
     save_pool(pool)
     if verbose:
         print(f"  ✓ 股票池已 refresh: 更新 {updated} 只, 移动止损比例 {trailing_pct:.0%}")

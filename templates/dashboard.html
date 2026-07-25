@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stock Analysis Pro</title>
+<style>
+:root {
+  --bg:#0d0f14; --card:#161922; --card2:#1c1f2b; --border:#262a38; --border2:#363b50;
+  --text:#e0e4ec; --text2:#a0a8b8; --muted:#6b7280;
+  /* 中国习惯: 红涨绿跌 */
+  --up:#ef4444; --up2:#3b1111;   /* 红=涨/盈/正面 */
+  --down:#22c55e; --down2:#0f2a1a; /* 绿=跌/亏/负面 */
+  --warn:#ef6b6b; --warn2:#4a1c1c; /* 红=警告/风险(非涨跌) */
+  --yellow:#f0c030; --yellow2:#3a2e10;
+  --blue:#5b9cf6; --blue2:#1a3050;
+  --purple:#a78bfa; --orange:#fb923c;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;font-size:15px;line-height:1.5;overflow:hidden;height:100vh}
+
+/* ── 顶栏 ── */
+header{background:var(--card);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;align-items:center;justify-content:space-between;height:56px;flex-shrink:0}
+header h1{font-size:20px;font-weight:700;letter-spacing:.5px}
+header .hdr-right{display:flex;align-items:center;gap:16px}
+.regime-badge{padding:6px 16px;border-radius:14px;font-weight:700;font-size:15px;letter-spacing:.3px}
+.regime-bull{background:var(--up2);color:var(--up)}       /* 多头=红涨 */
+.regime-neutral{background:var(--yellow2);color:var(--yellow)}
+.regime-bear{background:var(--down2);color:var(--down)}    /* 空头=绿跌 */
+.regime-unknown{background:#1e293b;color:var(--muted)}
+.refresh-btn{background:var(--blue);color:#fff;border:none;padding:8px 18px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600;transition:opacity .15s}
+.refresh-btn:hover{opacity:.85}
+
+/* ── 三栏主体 ── */
+main{display:flex;height:calc(100vh - 56px);overflow:hidden}
+
+/* ── 左栏 ── */
+.col-left{width:300px;min-width:260px;background:var(--card);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+.col-left h3{padding:14px 18px;font-size:15px;color:var(--muted);border-bottom:1px solid var(--border);flex-shrink:0;font-weight:600}
+.concept-list{flex:1;overflow-y:auto}
+.concept-row{padding:10px 18px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,.03);transition:background .12s}
+.concept-row:hover{background:rgba(96,165,250,.06)}
+.concept-row.active{background:rgba(96,165,250,.1);border-left:3px solid var(--blue);padding-left:15px}
+.concept-row .cn{font-size:15px;font-weight:600;color:var(--text)}
+.concept-row .ci{font-size:14px;color:var(--muted);white-space:nowrap;display:flex;align-items:center;gap:6px}
+.concept-row .cc{color:var(--blue);font-weight:700;font-size:14px}
+.cp-up{color:var(--up)} .cp-down{color:var(--down)}  /* 红涨绿跌 */
+/* ── 折叠区(0成分股概念) ── */
+.collapse-toggle{display:flex;align-items:center;justify-content:space-between;padding:10px 18px;cursor:pointer;color:var(--muted);font-size:14px;font-weight:600;border-top:1px solid var(--border);transition:background .12s;user-select:none}
+.collapse-toggle:hover{background:rgba(96,165,250,.06)}
+.collapse-toggle .arrow{transition:transform .2s;font-size:12px}
+.collapse-toggle.expanded .arrow{transform:rotate(90deg)}
+.collapse-body{max-height:0;overflow:hidden;transition:max-height .3s ease}
+.collapse-body.open{max-height:2000px}
+
+/* ── 中栏 ── */
+.col-center{flex:1;overflow-y:auto;padding:18px 20px;min-width:0}
+.col-center .empty{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--muted);opacity:.5;font-size:18px}
+.col-center h2{font-size:18px;margin-bottom:14px;font-weight:700}
+.col-center h2 .badge{font-size:14px;color:var(--muted);font-weight:400}
+
+/* ── 自选股卡(单行, 策略截断, 悬停展开) ── */
+.wl-section{margin-bottom:18px}
+.wl-section-title{font-size:18px;font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.wl-card{background:var(--card2);border:1px solid var(--border2);border-radius:12px;padding:10px 16px;margin-bottom:8px;cursor:pointer;transition:all .15s}
+.wl-card:hover{border-color:var(--blue);background:#1f2234}
+.wl-row{display:flex;align-items:center;gap:8px;flex-wrap:nowrap}
+/* ── 策略区: 常态截断, 悬停展开全文 ── */
+.wl-strat-line{color:var(--blue);font-size:14px;font-weight:600;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;flex-shrink:1;min-width:0}
+.wl-card:hover .wl-strat-line{white-space:normal;overflow:visible;text-overflow:unset;flex-shrink:0;flex-basis:100%;margin-top:4px}
+.wl-card:hover .wl-row{flex-wrap:wrap}
+/* ── 关键项: 涨幅+评分 粗体彩色 ── */
+.wl-name{font-weight:700;font-size:16px;color:#fff;flex-shrink:0}
+.wl-sym{color:var(--muted);font-size:14px;margin-left:2px;flex-shrink:0}
+.wl-pct{font-weight:700;font-size:16px;letter-spacing:.3px;flex-shrink:0}
+.wl-pct-up{color:var(--up)} .wl-pct-down{color:var(--down)}
+/* ── 非关键项全灰 ── */
+.wl-metric{font-size:14px;color:var(--muted);display:inline-flex;align-items:baseline;gap:2px;flex-shrink:0}
+.wl-metric b{font-weight:600;color:var(--text2);font-size:14px}
+.wl-metric-sep{color:var(--muted);font-size:12px;margin:0 4px;opacity:.6;flex-shrink:0}
+.wl-pos{color:var(--muted);font-size:14px;flex-shrink:0}
+.wl-score{font-weight:700;font-size:14px;color:var(--yellow)}
+.chip,.rating-tag,.hot-tag,.entered-dot{flex-shrink:0}
+
+/* ── 通用标签 ── */
+.entered-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--up);margin-right:6px;flex-shrink:0}  /* 持仓=红点 */
+.rating-tag{display:inline-block;padding:3px 8px;border-radius:6px;font-size:13px;font-weight:700}
+.r-关注{background:var(--blue2);color:var(--blue)} .r-观察{background:var(--yellow2);color:var(--yellow)}
+.r-暂避{background:var(--warn2);color:var(--warn)} .r-推荐{background:var(--up2);color:var(--up)}  /* 推荐=红,暂避=警告红 */
+.hot-tag{display:inline-block;padding:3px 8px;border-radius:6px;font-size:13px;font-weight:700}
+.ht-持续发酵{background:#3b1111;color:var(--up)} .ht-新兴{background:var(--blue2);color:var(--blue)}
+.ht-波段上涨{background:var(--yellow2);color:var(--yellow)} .ht-衰减{background:var(--down2);color:var(--down)}
+.ht-退潮{background:#1e1e1e;color:var(--muted)} .ht-一日游{background:#1e1e1e;color:var(--muted)}
+.ht-首次出现{background:#2d1b69;color:var(--purple)}
+.chip{display:inline-block;padding:3px 8px;border-radius:6px;font-size:13px;font-weight:600;background:#1a1d27;color:var(--muted)}
+
+/* ── 成分股表 ── */
+table{width:100%;border-collapse:collapse}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid rgba(255,255,255,.04);white-space:nowrap}
+th{color:var(--muted);font-size:14px;position:sticky;top:0;background:var(--bg);z-index:1;font-weight:600}
+tr:hover{background:rgba(255,255,255,.02)}
+.sym-muted{color:var(--muted);font-size:13px}
+
+/* ── 右栏 ── */
+.col-right{width:380px;min-width:340px;background:var(--card);border-left:1px solid var(--border);overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:14px}
+.col-right h3{font-size:16px;font-weight:700;margin-bottom:8px}
+.decision-block{background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:14px 16px;font-size:14px}
+.decision-block .title{font-weight:700;margin-bottom:10px;font-size:16px;display:flex;align-items:center;gap:6px}
+.decision-block .row{display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:14px}
+.decision-block .row b{font-weight:700}
+.decision-block .sub{font-size:13px;color:var(--muted);padding:2px 0 4px 12px}
+/* 语义色: up/down 用于涨跌, warn用于风险 */
+.up{color:var(--up)} .down{color:var(--down)} .warn{color:var(--warn)} .yellow{color:var(--yellow)} .blue{color:var(--blue)} .muted{color:var(--muted)}
+/* 分布条 */
+.bar-row{display:flex;align-items:center;gap:10px;margin:4px 0;font-size:14px}
+.bar-row .bar-label{width:80px;text-align:right;color:var(--text2);flex-shrink:0;font-size:13px}
+.bar-row .bar-track{flex:1;height:14px;background:var(--border);border-radius:7px;overflow:hidden}
+.bar-row .bar-fill{height:100%;border-radius:7px;min-width:2px}
+.bar-row .bar-val{width:32px;font-size:13px;color:var(--muted);text-align:right}
+
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--border2)}
+
+#loading{display:flex;align-items:center;justify-content:center;height:60px;color:var(--muted);font-size:15px}
+.spinner{width:20px;height:20px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .6s linear infinite;margin-right:10px}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header>
+  <h1>📊 Stock Analysis Pro</h1>
+  <div class="hdr-right">
+    <span id="regime-badge" class="regime-badge regime-unknown">--</span>
+    <span class="muted" style="font-size:15px;" id="date-label">--</span>
+    <button class="refresh-btn" onclick="refreshAll()">刷新</button>
+  </div>
+</header>
+
+<main>
+  <div class="col-left">
+    <h3>🔥 概念榜 <span id="board-info" style="font-weight:400;font-size:14px;"></span></h3>
+    <div class="concept-list" id="concept-list"><div id="loading"><div class="spinner"></div>加载中</div></div>
+  </div>
+  <div class="col-center" id="col-center">
+    <div class="empty" id="empty-hint">
+      <div style="font-size:48px;margin-bottom:16px;opacity:.25;">🔬</div>
+      <div>← 点击左侧概念查看成分股</div>
+      <div style="font-size:14px;margin-top:8px;">或查看上方自选股卡片</div>
+    </div>
+  </div>
+  <div class="col-right" id="col-right">
+    <div id="loading"><div class="spinner"></div>加载中</div>
+  </div>
+</main>
+
+<script>
+const API = '/api/v1/dashboard';
+let pipeData = null, decData = null, activeConcept = null;
+
+const HOT_EMOJI = {'持续发酵':'🔥','新兴':'🆕','波段上涨':'📈','衰减':'⚠️','退潮':'📉','一日游':'💤','首次出现':'🌟','无概念':'·'};
+const HOT_ORDER = {'持续发酵':0,'新兴':1,'波段上涨':2,'衰减':3,'退潮':4,'一日游':5,'首次出现':6,'无概念':7};
+const STAGE_LABEL = {trending:'📈趋势', platform:'🟦平台', about_to_launch:'🟢待启动', breakout:'🚀突破', running:'🔥主升', falling:'📉下跌'};
+
+async function fetchJSON(url) {
+  try { const r = await fetch(url); return await r.json(); }
+  catch(e) { console.error(url, e); return {ok:false, error:e.message}; }
+}
+const px = v => typeof v==='number' ? v.toFixed(2) : '--';
+const pct = v => typeof v==='number' ? (v>=0?'+':'')+v.toFixed(1)+'%' : '--';
+
+async function refreshAll() {
+  const [statusR, pipeR, decR] = await Promise.all([
+    fetchJSON(API+'/status'),
+    fetchJSON(API+'/pipeline'),
+    fetchJSON(API+'/decision'),
+  ]);
+  if (!statusR.ok || !pipeR.ok || !decR.ok) { console.error('加载失败', statusR, pipeR, decR); return; }
+  pipeData = pipeR.data;
+  decData = decR.data;
+  renderHeader(statusR.data);
+  renderLeft();
+  renderCenterWatchlist();
+  renderRight();
+  const topConcept = (pipeData.pool_by_concept||[])[0];
+  if (topConcept) selectConcept(topConcept.name);
+}
+
+function renderHeader(st) {
+  document.getElementById('date-label').textContent = new Date().toISOString().slice(0,10);
+  const badge = document.getElementById('regime-badge');
+  const cls = {'多头':'bull','震荡':'neutral','空头':'bear'}[st.regime]||'unknown';
+  badge.className = 'regime-badge regime-'+cls;
+  badge.textContent = '大盘 '+st.regime;
+  if (st.regime_diff != null) badge.textContent += ' '+pct(st.regime_diff);
+}
+
+function renderLeft() {
+  const bp = pipeData.board_pool;
+  document.getElementById('board-info').textContent = bp ? `共${bp.count}个 · ${bp.fetched_at?.slice(0,10)||''}` : '';
+  const heatMap = Object.fromEntries((pipeData.concept_heat?.concepts||[]).map(c => [c.name, c]));
+  const poolMap = Object.fromEntries((pipeData.pool_by_concept||[]).map(x => [x.name, x.count]));
+  const boardItems = bp?.items || [];
+  const seen = new Set(); const merged = [];
+  for (const c of boardItems) {
+    seen.add(c.name); const heat = heatMap[c.name];
+    merged.push({ name:c.name, bk_code:c.bk_code, change_pct:c.change_pct, pool_count:poolMap[c.name]||0, in_board:true, hot_type: heat?.hot_type || '首次出现', consecutive_days: heat?.consecutive_days || 0, cumulative_pct: heat?.cumulative_pct || 0 });
+  }
+  for (const [name, count] of Object.entries(poolMap)) {
+    if (!seen.has(name)) { const heat = heatMap[name];
+      merged.push({ name, bk_code:null, change_pct:null, pool_count:count, in_board:false, hot_type: heat?.hot_type || '首次出现', consecutive_days: heat?.consecutive_days || 0, cumulative_pct: heat?.cumulative_pct || 0 });
+    }
+  }
+  // 排序: 有成分股优先 → 热度 → 成分股数 → 涨跌幅
+  merged.sort((a,b) => {
+    const hasA = a.pool_count > 0 ? 0 : 1, hasB = b.pool_count > 0 ? 0 : 1;
+    return hasA-hasB || (HOT_ORDER[a.hot_type]||7)-(HOT_ORDER[b.hot_type]||7) || b.pool_count-a.pool_count || (b.change_pct||0)-(a.change_pct||0);
+  });
+
+  const withStocks = merged.filter(c => c.pool_count > 0);
+  const noStocks = merged.filter(c => c.pool_count === 0);
+
+  let h = '';
+  withStocks.forEach(c => {
+    const pctCls = (c.change_pct||0) >= 0 ? 'cp-up' : 'cp-down';
+    const emoji = HOT_EMOJI[c.hot_type] || '·';
+    h += `<div class="concept-row${activeConcept===c.name?' active':''}" data-concept="${c.name}" onclick="selectConcept('${c.name}')">
+      <div>
+        <div class="cn">${emoji} ${c.name}${c.consecutive_days>1?' <span style="font-size:12px;color:var(--muted);">连'+c.consecutive_days+'天</span>':''}</div>
+        ${c.cumulative_pct?`<div style="font-size:12px;color:var(--muted);">累涨${pct(c.cumulative_pct)}</div>`:''}
+      </div>
+      <div class="ci">
+        ${c.change_pct!=null?`<span class="cp ${pctCls}">${pct(c.change_pct)}</span> `:''}
+        <span class="cc">${c.pool_count}</span>
+      </div>
+    </div>`;
+  });
+
+  // 0成分股概念 → 自动折叠
+  if (noStocks.length) {
+    h += `<div class="collapse-toggle" onclick="this.classList.toggle('expanded');this.nextElementSibling.classList.toggle('open');">
+      <span>📁 无成分股概念 (${noStocks.length})</span><span class="arrow">▶</span>
+    </div>`;
+    h += '<div class="collapse-body">';
+    noStocks.forEach(c => {
+      const pctCls = (c.change_pct||0) >= 0 ? 'cp-up' : 'cp-down';
+      const emoji = HOT_EMOJI[c.hot_type] || '·';
+      h += `<div class="concept-row${activeConcept===c.name?' active':''}" data-concept="${c.name}" onclick="selectConcept('${c.name}')">
+        <div>
+          <div class="cn">${emoji} ${c.name}${c.consecutive_days>1?' <span style="font-size:12px;color:var(--muted);">连'+c.consecutive_days+'天</span>':''}</div>
+          ${c.cumulative_pct?`<div style="font-size:12px;color:var(--muted);">累涨${pct(c.cumulative_pct)}</div>`:''}
+        </div>
+        <div class="ci">
+          ${c.change_pct!=null?`<span class="cp ${pctCls}">${pct(c.change_pct)}</span> `:''}
+          <span class="muted">0</span>
+        </div>
+      </div>`;
+    });
+    h += '</div>';
+  }
+
+  document.getElementById('concept-list').innerHTML = h;
+}
+
+// ── 自选股(单行截断, 悬停展开) ──
+function renderCenterWatchlist() {
+  const wl = pipeData.watchlist || [];
+  if (!wl.length) { document.getElementById('watchlist-section')?.remove(); return; }
+  let h = `<div id="watchlist-section" class="wl-section">
+    <div class="wl-section-title">⭐ 自选股 <span class="badge">${wl.length}只持仓</span></div>`;
+  wl.forEach(s => {
+    const htEmoji = HOT_EMOJI[s.hot_type] || '';
+    const stageL = STAGE_LABEL[s.stage] || s.stage || '-';
+    const pnlPct = s.price_entry && s.entered_price ? (s.price_entry - s.entered_price)/s.entered_price*100 : null;
+    const pnlCls = pnlPct != null ? (pnlPct >= 0 ? 'wl-pct-up' : 'wl-pct-down') : '';
+    const sigs = (s.signals||[]).join(' · ');
+    const bpFull = s.buy_point || '';
+    const shFull = s.sell_hint || '';
+    const t = s.trend || {};
+    const trendKey = t.bull ? '✅多头' : (t.above_ma5 ? '站上MA5' : '跌破MA5');
+
+    // 拼完整策略文本(单span, CSS截断常态/展开悬停)
+    const stratParts = [];
+    if (sigs) stratParts.push(sigs);
+    if (bpFull) stratParts.push('💡'+bpFull);
+    if (shFull) stratParts.push('⚠'+shFull);
+    const stratFull = stratParts.join(' | ');
+
+    h += `<div class="wl-card" onclick="selectConcept('${(s.concepts||[])[0]||''}')">
+      <div class="wl-row">
+        <span class="chip">${stageL} <span class="wl-score">${s.score||'-'}分</span></span>
+        <span class="entered-dot"></span><span class="wl-name">${s.name}</span><span class="wl-sym">${s.symbol}</span>
+        <span class="rating-tag r-${s.rating||'暂避'}">${s.rating||'-'}</span>
+        ${htEmoji?`<span class="hot-tag ht-${s.hot_type||'无概念'}">${htEmoji} ${s.hot_type||'-'}</span>`:''}
+        ${pnlPct!=null?`<span class="wl-metric-sep">|</span><span class="wl-pct ${pnlCls}">${pct(pnlPct)}</span>`:''}
+        <span class="wl-metric-sep">|</span>
+        <span class="wl-metric">阻<b>¥${px(s.resistance)}</b></span><span class="wl-metric-sep">/</span><span class="wl-metric">支<b>¥${px(s.support)}</b></span>
+        ${s.stop_level?`<span class="wl-metric-sep">/</span><span class="wl-metric">止损<b>¥${px(s.stop_level)}</b></span>`:''}
+        <span class="wl-metric-sep">|</span>
+        <span class="wl-metric">${trendKey}${t.ma5?'·MA5≈'+px(t.ma5):''}</span>
+        ${s.position?`<span class="wl-metric-sep">|</span><span class="wl-pos">${s.position}%仓</span>`:''}
+        ${stratFull?`<span class="wl-metric-sep">|</span><span class="wl-strat-line">${stratFull}</span>`:''}
+      </div>
+    </div>`;
+  });
+  h += '</div>';
+  const center = document.getElementById('col-center');
+  const oldWl = document.getElementById('watchlist-section'); if (oldWl) oldWl.remove();
+  const emptyHint = document.getElementById('empty-hint'); if (emptyHint) emptyHint.style.display = 'none';
+  center.insertAdjacentHTML('afterbegin', h);
+}
+
+function selectConcept(name) {
+  activeConcept = name;
+  document.querySelectorAll('.concept-row').forEach(el => el.classList.toggle('active', el.dataset.concept === name));
+  const stocks = (pipeData.concept_stocks && pipeData.concept_stocks[name]) || [];
+  const bpItem = (pipeData.board_pool?.items||[]).find(c => c.name === name);
+  const heatInfo = (pipeData.concept_heat?.concepts||[]).find(c => c.name === name);
+
+  let pctCls = '';
+  if (bpItem) pctCls = (bpItem.change_pct||0) >= 0 ? 'up' : 'down';  /* 红涨绿跌 */
+
+  let h = `<h2>${name}`;
+  if (bpItem) h += ` <span class="${pctCls}">${pct(bpItem.change_pct)}</span>`;
+  if (heatInfo) {
+    const emoji = HOT_EMOJI[heatInfo.hot_type] || '';
+    h += ` ${emoji}<span class="hot-tag ht-${heatInfo.hot_type}">${heatInfo.hot_type}</span>`;
+    if (heatInfo.consecutive_days > 1) h += ` 连${heatInfo.consecutive_days}天`;
+    h += ` 累${pct(heatInfo.cumulative_pct)}`;
+  }
+  h += ` <span class="badge">池内 ${stocks.length} 只</span></h2>`;
+
+  if (stocks.length === 0) {
+    h += '<div class="muted" style="padding:20px;font-size:15px;">该概念暂无池内成分股</div>';
+  } else {
+    h += `<table><thead><tr>
+      <th>股票</th><th>热度</th><th>形态</th><th>评分</th><th>评级</th><th>阻力/支撑</th><th>买点</th><th>止损</th>
+    </tr></thead><tbody>`;
+    stocks.forEach(s => {
+      const htEmoji = HOT_EMOJI[s.hot_type] || '';
+      const resSup = (s.resistance || s.support) ? `${px(s.resistance)}/${px(s.support)}` : '--/--';
+      h += `<tr>
+        <td>${s.entered?'<span class="entered-dot"></span>':''}<b>${s.name||'-'}</b> <span class="sym-muted">${s.symbol||''}</span></td>
+        <td>${htEmoji} <span class="hot-tag ht-${s.hot_type||'无概念'}">${s.hot_type||'-'}</span></td>
+        <td>${STAGE_LABEL[s.stage]||s.stage||'-'}</td>
+        <td><b style="color:var(--yellow);">${s.score||'-'}</b></td>
+        <td><span class="rating-tag r-${s.rating||'暂避'}">${s.rating||'-'}</span></td>
+        <td>${resSup}</td>
+        <td>${px(s.buy_level)}</td>
+        <td>${px(s.stop_level)}</td>
+      </tr>`;
+    });
+    h += '</tbody></table>';
+
+    // 技术分析概述(单行, 策略截断/悬停展开)
+    h += '<div style="margin-top:10px;">';
+    h += '<div style="font-size:15px;font-weight:700;margin-bottom:8px;color:var(--text2);">技术分析概述</div>';
+    stocks.slice(0, 6).forEach(s => {
+      const t = s.trend || {};
+      const trendKey = t.bull ? '✅多头' : (t.above_ma5 ? '站上MA5' : '跌破MA5');
+      const sigs = (s.signals||[]).join(' · ');
+      const bpFull = s.buy_point || '';
+      const shFull = s.sell_hint || '';
+      const stageL = STAGE_LABEL[s.stage] || s.stage || '-';
+      const stratParts = [];
+      if (sigs) stratParts.push(sigs);
+      if (bpFull) stratParts.push('💡'+bpFull);
+      if (shFull) stratParts.push('⚠'+shFull);
+      const stratFull = stratParts.join(' | ');
+
+      h += `<div class="wl-card" style="margin-bottom:6px;">
+        <div class="wl-row">
+          <span class="chip">${stageL} <span class="wl-score">${s.score||'-'}分</span></span>
+          <span class="entered-dot"></span><span class="wl-name" style="font-size:15px;">${s.name}</span><span class="wl-sym">${s.symbol}</span>
+          <span class="rating-tag r-${s.rating||'暂避'}">${s.rating||'-'}</span>
+          <span class="wl-metric-sep">|</span>
+          <span class="wl-metric">阻<b>¥${px(s.resistance)}</b></span><span class="wl-metric-sep">/</span><span class="wl-metric">支<b>¥${px(s.support)}</b></span>
+          <span class="wl-metric-sep">|</span>
+          <span class="wl-metric">${trendKey}${t.ma5?'·MA5≈'+px(t.ma5):''}</span>
+          ${stratFull?`<span class="wl-metric-sep">|</span><span class="wl-strat-line">${stratFull}</span>`:''}
+        </div>
+      </div>`;
+    });
+    h += '</div>';
+  }
+
+  const center = document.getElementById('col-center');
+  const emptyHint = document.getElementById('empty-hint'); if (emptyHint) emptyHint.remove();
+  const oldDetail = document.getElementById('concept-detail'); if (oldDetail) oldDetail.remove();
+  const wlSection = document.getElementById('watchlist-section');
+  if (wlSection) { wlSection.insertAdjacentHTML('afterend', `<div id="concept-detail">${h}</div>`); }
+  else { center.innerHTML = h; }
+}
+
+// ── 右栏 ──
+function renderRight() {
+  const dc = decData;
+  const st = dc.stats || {};
+  let h = '';
+
+  // 大盘概况
+  h += `<div class="decision-block">
+    <div class="title">📋 ${dc.regime==='空头'?'🟢':'🔴'} ${dc.regime} · 持仓${st.held} · 池${st.pool_active}</div>
+    ${dc.regime==='空头'?'<div class="down" style="font-size:14px;">⚠️ 空头行情: 停止新开仓, 仅执行卖出</div>':''}
+  </div>`;
+
+  // 卖出(风险=warn红)
+  const sellUrgent = (dc.sell||[]).filter(s=>!String(s.reason||'').includes('评级转弱'));
+  const sellWeak = (dc.sell||[]).filter(s=>String(s.reason||'').includes('评级转弱'));
+  h += `<div class="decision-block">
+    <div class="title"><span class="warn">🔴 卖出 ${(dc.sell||[]).length}只</span></div>`;
+  sellUrgent.slice(0,6).forEach(s => {
+    const pnlCls = (s.pnl||0) >= 0 ? 'up' : 'down';  /* 红涨绿跌 */
+    h += `<div class="row"><span><b>${s.name}</b> <span class="sym-muted">${s.symbol}</span></span>
+      <span class="${pnlCls}" style="font-weight:700;">${pct(s.pnl)}</span></div>
+      <div class="sub">→ ${s.reason||''}</div>`;
+  });
+  if (sellWeak.length) h += `<div style="font-size:13px;color:var(--muted);margin-top:8px;">⬇️ 评级转弱建议了结 ${sellWeak.length}只</div>`;
+  if (!dc.sell||!dc.sell.length) h += '<div class="muted">无</div>';
+  h += '</div>';
+
+  // 买入(正面=up红)
+  h += `<div class="decision-block">
+    <div class="title"><span class="up">🔴 买入 ${(dc.buy||[]).length}只</span></div>`;
+  if (dc.regime==='空头') { h += '<div class="muted">空仓观望</div>'; }
+  else if (dc.buy && dc.buy.length) {
+    dc.buy.slice(0,6).forEach(b => {
+      const htEmoji = HOT_EMOJI[b.hot_type] || '';
+      h += `<div class="row"><span><b>${b.name}</b> <span class="sym-muted">${b.symbol}</span> ${htEmoji}<span class="hot-tag ht-${b.hot_type||'无概念'}">${b.hot_type||'-'}</span></span>
+        <span class="blue" style="font-weight:700;">买¥${px(b.buy)}</span></div>
+        <div class="sub">评分${b.score||'-'} · ${b.status||''} · 止损¥${px(b.stop)}</div>`;
+    });
+  } else { h += '<div class="muted">暂无临近买点标的</div>'; }
+  h += '</div>';
+
+  // 持仓
+  h += `<div class="decision-block">
+    <div class="title"><span class="yellow">🟡 持仓 ${(dc.hold||[]).length}只</span></div>`;
+  if (dc.hold && dc.hold.length) {
+    dc.hold.slice(0,8).forEach(hd => {
+      const pnlCls = (hd.pnl||0) >= 0 ? 'up' : 'down';  /* 红涨绿跌 */
+      h += `<div class="row"><span><b>${hd.name}</b> <span class="sym-muted">${hd.symbol}</span></span>
+        <span class="${pnlCls}" style="font-weight:700;">${pct(hd.pnl)}</span></div>
+        <div class="sub">止损¥${px(hd.stop)} · ${hd.rating||'-'}</div>`;
+    });
+  } else { h += '<div class="muted">无持仓</div>'; }
+  h += '</div>';
+
+  // 评级变化
+  const rc = dc.rating_change || [];
+  h += `<div class="decision-block">
+    <div class="title">🔺 评级变化 ${rc.length}条</div>`;
+  if (rc.length) {
+    rc.forEach(r => {
+      const arrow = r.dir==='up' ? '⬆️' : '⬇️';
+      h += `<div class="row"><span>${arrow} <b>${r.name}</b>(${r.symbol})</span><span class="muted">${r.from}→${r.to}</span></div>`;
+    });
+  } else h += '<div class="muted">今日无变化</div>';
+  h += '</div>';
+
+  // 热度追踪
+  const ht = pipeData?.concept_heat;
+  const htDist = pipeData?.pool_hot_type_dist || {};
+  const htTotal = Object.values(htDist).reduce((a,b)=>a+b,0);
+  const htColors = {'持续发酵':'var(--up)','新兴':'var(--blue)','波段上涨':'var(--yellow)','衰减':'var(--down)','退潮':'var(--muted)','一日游':'var(--muted)','首次出现':'var(--purple)','无概念':'var(--muted)'};
+  h += `<div class="decision-block"><div class="title">🔥 热度追踪 ${ht?'· '+ht.date:''}</div>`;
+  if (htDist && htTotal) {
+    h += '<div style="font-size:14px;color:var(--text2);margin-bottom:8px;">池内热度分布</div>';
+    for (const [k,v] of Object.entries(htDist)) {
+      const p = htTotal ? v/htTotal*100 : 0;
+      h += `<div class="bar-row"><span class="bar-label">${HOT_EMOJI[k]||'·'} ${k}</span>
+        <span class="bar-track"><span class="bar-fill" style="width:${p}%;background:${htColors[k]||'var(--muted)'}"></span></span>
+        <span class="bar-val">${v}</span></div>`;
+    }
+  }
+  const hotConcepts = (ht?.concepts||[]).filter(c => ['持续发酵','新兴','衰减'].includes(c.hot_type)).slice(0,8);
+  if (hotConcepts.length) {
+    h += '<div style="font-size:14px;color:var(--text2);margin:10px 0 8px;">关键概念热度</div>';
+    hotConcepts.forEach(c => {
+      const emoji = HOT_EMOJI[c.hot_type];
+      h += `<div class="row"><span>${emoji} <b>${c.name}</b> ${c.consecutive_days>1?'连'+c.consecutive_days+'天':''}</span>
+        <span class="muted">累${pct(c.cumulative_pct)} · 均日${pct(c.avg_pct)} · #${c.best_rank||'-'}</span></div>`;
+    });
+  }
+  h += '</div>';
+
+  // 全池分布
+  const sd = pipeData?.pool_stage_dist || {};
+  const rd = pipeData?.pool_rating_dist || {};
+  const total = Object.values(sd).reduce((a,b)=>a+b,0);
+  const stageColors = {trending:'var(--blue)', falling:'var(--down)', platform:'var(--yellow)', running:'var(--up)'};
+  h += `<div class="decision-block"><div class="title">📊 全池 ${total}只</div>`;
+  h += '<div style="font-size:14px;color:var(--text2);margin-bottom:8px;">形态分布</div>';
+  for (const [k,v] of Object.entries(sd)) {
+    const p = total ? v/total*100 : 0;
+    h += `<div class="bar-row"><span class="bar-label">${STAGE_LABEL[k]||k}</span>
+      <span class="bar-track"><span class="bar-fill" style="width:${p}%;background:${stageColors[k]||'var(--muted)'}"></span></span>
+      <span class="bar-val">${v}</span></div>`;
+  }
+  h += '<div style="font-size:14px;color:var(--text2);margin:10px 0 8px;">评级分布</div>';
+  for (const [k,v] of Object.entries(rd)) {
+    const p = total ? v/total*100 : 0;
+    h += `<div class="bar-row"><span class="bar-label">${k}</span>
+      <span class="bar-track"><span class="bar-fill" style="width:${p}%;background:var(--muted)"></span></span>
+      <span class="bar-val">${v}</span></div>`;
+  }
+  h += '</div>';
+
+  document.getElementById('col-right').innerHTML = h;
+}
+
+refreshAll();
+</script>
+</body>
+</html>

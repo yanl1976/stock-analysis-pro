@@ -74,7 +74,7 @@ def print_summary(data):
 
 def main():
     parser = argparse.ArgumentParser(description="Stock Analysis Pro — A股多维分析工具")
-    parser.add_argument("command", choices=["analyze", "market", "analyze-all", "add", "rm", "list", "clear", "concept", "review", "options", "portfolio", "breakthrough"])
+    parser.add_argument("command", choices=["analyze", "market", "analyze-all", "add", "rm", "list", "clear", "concept", "review", "options", "portfolio", "breakthrough", "decision", "dashboard"])
     parser.add_argument("symbol", nargs="*", help="Stock code(s), 支持多个 (空格分隔)")
     parser.add_argument("--date", help="Date YYYYMMDD")
     parser.add_argument("--json", action="store_true", help="JSON output")
@@ -252,6 +252,18 @@ def main():
                 print(json.dumps(data, ensure_ascii=False, indent=2))
             else:
                 print(fmt_breakthrough(data))
+            # 大盘状态门控: 空头 → 空仓观望, 不加入股票池(与 weekly_hotspot 路由一致)
+            if args.to_pool:
+                try:
+                    from plans.weekly_hotspot import market_regime
+                    regime, rdiff = market_regime()
+                except Exception:
+                    regime, rdiff = "未知", None
+                if regime == "空头":
+                    rdiff_s = f"{rdiff:+.2f}%" if isinstance(rdiff, (int, float)) else "—"
+                    print(f"\n🛑 大盘空头(MA20/MA60 {rdiff_s}) → 空仓观望, 不加入股票池")
+                    print("   (按 weekly_hotspot 路由: 空头无可靠策略, 规避买点窗口虚假信号)")
+                    args.to_pool = False
             # 累积加入策略股票池 (每日扫描用 --to-pool 触发)
             if args.to_pool:
                 from plans.stock_pool import add_entries
@@ -271,6 +283,39 @@ def main():
                 if new_entries:
                     added = add_entries(new_entries, reason_default="突破扫描精选")
                     print(f"[POOL] 已加入股票池 {len(new_entries)} 只 (新增 {added})")
+
+        elif args.command == "decision":
+            # 每日操作简报: 选股→跟踪→评级变化→买卖推荐 的决策闭环
+            from plans.decision_engine import build_brief, render_brief
+            brief = build_brief(use_quote=not args.no_browser)
+            if args.json:
+                print(json.dumps(brief, ensure_ascii=False, indent=2))
+            else:
+                text = render_brief(brief)
+                print(text)
+                if args.html:
+                    try:
+                        from core.html_renderer import render as _render
+                        import datetime as _dt
+                        clean = (text.replace("<<<WECHAT_CARD_START>>>", "")
+                                     .replace("<<<WECHAT_CARD_END>>>", "")
+                                     .replace("#NO_PUSH#", "").strip())
+                        out = _render(
+                            {"title": f"每日操作简报 {brief['date']}",
+                             "time": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                             "summary": f"大盘{brief['regime']} ｜ 买入{len(brief['buy'])} "
+                                        f"卖出{len(brief['sell'])} 持仓{len(brief['hold'])}",
+                             "body": clean},
+                            "task_report", output_dir=os.path.join(BASE_DIR, "data", "reports"),
+                            filename=f"decision_{brief['date']}.html")
+                        print(f"HTML_REPORT:{out}")
+                    except Exception as _e:
+                        print(f"(HTML 生成跳过: {_e})", file=sys.stderr)
+
+        elif args.command == "dashboard":
+            # Web 仪表盘: 本地浏览器查看 大盘/决策/持仓/池/调度 全貌
+            from web.app import main as dashboard_main
+            dashboard_main()
 
         elif args.command == "portfolio":
             from config import load_config

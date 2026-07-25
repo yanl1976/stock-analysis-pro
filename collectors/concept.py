@@ -175,8 +175,10 @@ def batch_klines(symbols: list, datalen=30, delay=0.15, verbose=False) -> dict:
     for i, sym in enumerate(new_symbols):
         klines = concept_leader_kline(sym, datalen=datalen)
         if klines:
-            # 保留 close/volume/low (low用于刚启动判定)
-            _kline_cache[sym] = [{'day': k['day'], 'close': float(k['close']), 'volume': float(k['volume']), 'low': float(k['low'])} for k in klines]
+            # 保留 day/close/volume/low/high (low用于刚启动判定, high用于 classify_stage 形态识别)
+            _kline_cache[sym] = [{'day': k['day'], 'close': float(k['close']),
+                                  'volume': float(k['volume']), 'low': float(k['low']),
+                                  'high': float(k['high'])} for k in klines]
         else:
             _kline_cache[sym] = []
 

@@ -100,6 +100,15 @@ def parse_command(text):
     if low in ("复盘", "review", "每日复盘", "收盘复盘"):
         return ["review"], "每日复盘"
 
+    # 每日决策简报 (选股→跟踪→评级变化→买卖推荐 的精简操作清单)
+    if any(k in low for k in ("决策", "操作建议", "操作清单", "简报", "买卖", "买入推荐", "卖出推荐", "今日操作")):
+        return ["decision", "--no-browser"], "每日决策简报"
+
+    # 仪表盘 (Web 前端查看全貌, 非推送类指令, 提示用户访问本地地址)
+    if any(k in low for k in ("仪表盘", "看板", "dashboard", "面板", "驾驶舱")):
+        return None, ("请在浏览器中访问仪表盘: http://localhost:8500\n"
+                      "或在本机运行: python core/cli.py dashboard")
+
     # 每周热点选股流水线 (须在"概念/热点"之前, 避免被裸"热点"抢先)
     if any(k in low for k in ("热点选股", "每周热点", "周报选股", "周热点")):
         return ["__weekly_hotspot__"], "每周热点选股"
@@ -158,6 +167,7 @@ def _is_valid_code(code: str) -> bool:
 _HELP = """📈 **Stock Analysis Pro 使用指南**
 直接 @我 或发下列指令：
 
+• `决策` / `操作建议` / `简报` —— 每日操作清单(买入/卖出/持仓/评级变化)
 • `分析 600519` 或 `600519` —— 个股 6 维分析
 • `加自选 600519` / `添加 600000` —— 加入自选股
 • `自选分析` / `分析全部` —— 自选股批量分析(汇总报告)
@@ -344,9 +354,9 @@ async def handle_message(client, frame):
         return
 
     # 支持 HTML 报告的指令: 自动追加 --html, 生成报告文件后一并发送
-    _HTML_CMDS = {"market", "review", "concept", "options", "analyze", "analyze-all"}
+    _HTML_CMDS = {"market", "review", "concept", "options", "analyze", "analyze-all", "decision"}
     # 机器人场景跳过 Playwright 浏览器采集 (快且 Windows 不崩); 概念走 list 阶段本就无需浏览器, 不加
-    _NO_BROWSER_CMDS = {"market", "review", "options", "analyze", "analyze-all"}
+    _NO_BROWSER_CMDS = {"market", "review", "options", "analyze", "analyze-all", "decision"}
     run_args = list(args)
     if args and args[0] in _HTML_CMDS:
         run_args.append("--html")
