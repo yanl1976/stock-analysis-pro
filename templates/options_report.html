@@ -124,7 +124,7 @@ h3 { font-size: 14px; color: #ffd93d; margin: 12px 0 6px; }
 {% for code, info in underlyings.items() %}
 {% set hv = hv_map.get(code, {}) %}
 {% set hv60 = hv.get('hv60') %}
-{% set atm_iv = atm_ivs.get(code, 0) %}
+{% set atm_iv = data.get('atm_ivs', {}).get(code, 0) %}
 {% set spread = (atm_iv - hv60) if (atm_iv and hv60) else none %}
 <div class="overview-item">
   <div class="name">{{ info.name }}</div>

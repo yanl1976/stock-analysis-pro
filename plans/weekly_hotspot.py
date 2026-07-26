@@ -37,13 +37,12 @@ sys.path.insert(0, BASE_DIR)
 DATA_DIR = os.path.join(BASE_DIR, "data")
 REPORTS_DIR = os.path.join(DATA_DIR, "reports")
 os.makedirs(REPORTS_DIR, exist_ok=True)
-WATCHLIST_PATH = os.path.join(DATA_DIR, "watchlist.json")
+# 人工自选股统一数据源: stock_pool.json 中 watch=True (不再有独立 watchlist.json)
 
 from collectors.concept import concept_rank_sina, merge_duplicate_concepts
 from collectors.quote import realtime as _realtime
 from plans.concept_analysis import filter_concepts
 from plans.breakout_scan import run as run_breakthrough, format_report as fmt_breakthrough, _kline_cached
-from core.cli import save_watchlist
 from analysis.breakout import STAGE_LABELS, classify_stage as _classify_stage
 
 
@@ -237,7 +236,7 @@ def _sell_hint(buy_price, stage, stop_loss):
 
 
 def enrich_watchlist(codes, verbose=False):
-    """人工自选股 = data/watchlist.json 的纯代码列表; 补全 名称/现价/涨跌幅/形态分析,
+    """人工自选股 = stock_pool.json 中 watch=True 的代码列表; 补全 名称/现价/涨跌幅/形态分析,
     使「自选股」栏目呈现「综合分析」而非仅代码。
 
     单只失败不影响其它 (实时行情/缓存缺失均降级为仅代码)。零触网部分走 K线缓存。
@@ -560,14 +559,15 @@ def build_watchlist_from_candidates(breakthrough: dict, verbose: bool = True) ->
 
 
 def build_report(date_str: str, hotspots: list, human_watchlist: list,
-                 pool_entries: list, breakthrough: dict, regime: str = None) -> str:
+                 pool_entries: list, breakthrough: dict, regime: str = None,
+                 daily: bool = False) -> str:
     regime = regime or breakthrough.get("regime", "未知")
     rinfo = REGIME_STRATEGY.get(regime, REGIME_STRATEGY["未知"])
     final = breakthrough.get("final", breakthrough.get("candidates", []))
     is_bear = (regime == "空头")
     rdiff = breakthrough.get("regime_diff")
     lines = [f"\n{'='*50}",
-             f"  📊 本周热点选股报告 ({date_str})",
+             f"  📊 {('每日' if daily else '本周')}热点选股报告 ({date_str})",
              f"{'='*50}"]
 
     # 〇、大盘行情状态与策略路由
@@ -591,7 +591,7 @@ def build_report(date_str: str, hotspots: list, human_watchlist: list,
     # 二、自选股 (人工维护, 已补全名称/现价/形态分析)
     lines.append(f"\n【二、自选股】")
     if not human_watchlist:
-        lines.append(f"  （空 — 由你人工维护, 系统不再自动覆盖; 可在 data/watchlist.json 加入股票代码）")
+        lines.append(f"  （空 — 由你人工维护, 系统不再自动覆盖; 可用 `python core/cli.py add <代码>` 加入自选）")
     else:
         lines.append(f"  共 {len(human_watchlist)} 只 (名称/现价/形态分析):")
         for i, w in enumerate(human_watchlist, 1):
@@ -707,7 +707,7 @@ def build_report(date_str: str, hotspots: list, human_watchlist: list,
     return "\n".join(lines)
 
 
-def build_wechat_card(date_str, hotspots, pool_entries, breakthrough, regime):
+def build_wechat_card(date_str, hotspots, pool_entries, breakthrough, regime, daily=False):
     """企微摘要卡片: markdown 卡片式(标题/加粗/引用块), 统一 ①②③④ 章节编号,
     格式化不堆文字; 详细买卖计划见 HTML 周报。"""
     b = breakthrough or {}
@@ -719,7 +719,7 @@ def build_wechat_card(date_str, hotspots, pool_entries, breakthrough, regime):
     count = b.get("count", 0)
     dot = "🔴" if is_bear else ("🟢" if rg == "多头" else "🟡")
 
-    L = [f"## 📊 本周热点选股 · {date_str}"]
+    L = [f"## 📊 {('每日' if daily else '本周')}热点选股 · {date_str}"]
 
     # ① 大盘状态与策略
     L.append("")
@@ -791,6 +791,8 @@ def main():
     ap.add_argument("--no-push", action="store_true", help="仅生成报告, 不推送微信")
     ap.add_argument("--html", action="store_true", help="生成 HTML 报告文件 (输出 HTML_REPORT:<path>, 供 bot 附带发送)")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
+    ap.add_argument("--daily", action="store_true",
+                    help="每日模式(标题/文件名/入池标签用'每日'而非'本周')")
     args = ap.parse_args()
 
     date_str = datetime.now().strftime("%Y-%m-%d")
@@ -817,27 +819,12 @@ def main():
     breakthrough = enrich_candidates(breakthrough,
                                      runup_days=args.runup_days,
                                      runup_pct=args.runup_pct)
-    # 2(延后). 策略精选 → 加入股票池(累积+TTL+去重), 不再覆盖人工自选股
+    # 2(延后). 策略精选 → 加入股票池(累积+TTL+去重) 延后到蒸馏之后(见 3c 后落地)
     from plans.stock_pool import add_entries as _pool_add, load_pool as _pool_load
-    final_picks = breakthrough.get("final", [])
-    pool_new = []
-    for c in final_picks:
-        sym = _bare(c.get("symbol", ""))
-        if not sym:
-            continue
-        cons = c.get("concepts") or ([c.get("concept")] if c.get("concept") else [])
-        pool_new.append({
-            "symbol": sym,
-            "name": c.get("name", sym),
-            "concepts": cons,
-            "reason": "热点突破精选(%s)" % regime,
-        })
-    if pool_new:
-        _pool_add(pool_new, reason_default="热点突破精选(%s)" % regime)
-        print(f"    策略精选 {len(pool_new)} 只已加入股票池(累积+TTL+去重)", flush=True)
-    # 人工自选股(只读, 系统不写) → 补全名称/现价/形态分析
+    # 人工自选股 (统一数据源: stock_pool.json 中 watch=True, 只读) → 补全名称/现价/形态分析
     try:
-        _raw_wl = json.load(open(WATCHLIST_PATH, encoding="utf-8")) or []
+        from plans.stock_pool import list_watch
+        _raw_wl = [e["symbol"] for e in list_watch()]
     except Exception:
         _raw_wl = []
     human_watchlist = enrich_watchlist(_raw_wl, verbose=args is not None)
@@ -871,11 +858,30 @@ def main():
     print(f"    大盘状态: {regime} (MA20-MA60 {regime_diff:+.2f}%) → 策略[{rinfo['label']}] "
           f"精选 {len(final)} 只 (候选池 {breakthrough.get('count',0)} 只)", flush=True)
 
+    # 2(延后落地). 策略精选 → 加入股票池(累积+TTL+去重), 不再覆盖人工自选股
+    #    必须在蒸馏(apply_regime_strategy)之后, 此时 breakthrough['final'] 才是蒸馏精选结果
+    final_picks = breakthrough.get("final", [])
+    pool_new = []
+    for c in final_picks:
+        sym = _bare(c.get("symbol", ""))
+        if not sym:
+            continue
+        cons = c.get("concepts") or ([c.get("concept")] if c.get("concept") else [])
+        pool_new.append({
+            "symbol": sym,
+            "name": c.get("name", sym),
+            "concepts": cons,
+            "reason": "热点突破精选(%s)" % ("每日" if args.daily else "每周"),
+        })
+    if pool_new:
+        _pool_add(pool_new, reason_default="热点突破精选(%s)" % ("每日" if args.daily else "每周"))
+        print(f"    策略精选 {len(pool_new)} 只已加入股票池(累积+TTL+去重)", flush=True)
+
     # 4. 报告
-    report = build_report(date_str, hotspots, human_watchlist, pool_entries, breakthrough, regime=regime)
+    report = build_report(date_str, hotspots, human_watchlist, pool_entries, breakthrough, regime=regime, daily=args.daily)
 
     # 4a. 企微摘要卡片 (统一数据源: 定时推送与 bot 路径共用同一张卡片)
-    card = build_wechat_card(date_str, hotspots, pool_entries, breakthrough, regime)
+    card = build_wechat_card(date_str, hotspots, pool_entries, breakthrough, regime, daily=args.daily)
     # 用标记块输出到 stdout, 供 wecom_bot(--no-push 路径)提取 → 微信只推卡片, 不推全文报告
     print("<<<WECHAT_CARD_START>>>")
     print(card)
@@ -894,14 +900,14 @@ def main():
                     "breakthrough": breakthrough,
                 },
                 "weekly_hotspot_report",
-                filename=f"weekly_hotspot_report_{date_str}.html",
+                filename=f"{('daily' if args.daily else 'weekly')}_hotspot_report_{date_str}.html",
             )
             print(f"HTML_REPORT:{html_path}")
         except Exception as e:
             print(f"[HTML] 报告生成失败: {e}", file=sys.stderr)
 
     # 报告落盘 (无论是否推送都保留交付物)
-    report_path = os.path.join(REPORTS_DIR, f"weekly_hotspot_report_{date_str}.md")
+    report_path = os.path.join(REPORTS_DIR, f"{('daily' if args.daily else 'weekly')}_hotspot_report_{date_str}.md")
     try:
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(report)

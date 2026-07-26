@@ -59,12 +59,12 @@ def _get_indices() -> list:
 
 
 def _get_watchlist() -> list:
-    """加载自选股"""
-    wl_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'watchlist.json')
-    if os.path.exists(wl_path):
-        with open(wl_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return []
+    """加载自选股 (统一数据源: stock_pool.json 中 watch=True)."""
+    try:
+        from plans.stock_pool import list_watch
+        return [e["symbol"] for e in list_watch()]
+    except Exception:
+        return []
 
 
 # ── 主流程 ──

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}自选股批量分析 — {{ data.date|default('') }}{% endblock %}
+{% block body %}
+
+{% macro pct_color(v) %}{% if v is not none and v > 0 %}up{% elif v is not none and v < 0 %}down{% else %}flat{% endif %}{% endmacro %}
+{% macro fmt_pct(v) %}{% if v is not none %}{{ '%+.2f'|format(v) }}%{% else %}--{% endif %}{% endmacro %}
+{% macro fmt_num(v, d=2) %}{% if v is not none %}{{ '{:,.{}f}'.format(v, d) }}{% else %}--{% endif %}{% endmacro %}
+
+{% set stocks = data.stocks|default([]) %}
+
+<div class="header">
+  <h1>📋 自选股批量分析</h1>
+  <div class="subtitle">{{ data.date|default('') }} · 共 {{ stocks|length }} 只 · 按综合评分降序</div>
+</div>
+
+{% if not stocks %}
+<div class="section"><div style="padding:20px;text-align:center;color:var(--text-secondary);">自选股为空（stock_pool 中无 watch=True），请先添加或运行热点选股流程。</div></div>
+{% endif %}
+
+{% for s in stocks %}
+{% set basic = s.basic|default({}) %}
+{% set score = s.score|default({}) %}
+{% set score_val = score.total_score|default(0) %}
+{% set sigs = score.signals|default([]) %}
+{% set warns = score.warnings|default([]) %}
+<div class="section">
+  <div style="padding:14px 16px 10px;display:flex;align-items:center;">
+    <div style="flex:1;">
+      <div style="font-size:16px;font-weight:700;">{{ basic.name|default('?') }} <span style="font-size:12px;font-weight:400;color:var(--text-secondary);">{{ s.symbol }}</span></div>
+      <div style="font-size:12px;color:var(--text-secondary);">
+        <span class="{{ pct_color(basic.change_pct) }}">¥{{ fmt_num(basic.price) }} {{ fmt_pct(basic.change_pct) }}</span>
+        {% if basic.pe %} · PE {{ basic.pe }}{% endif %}
+        {% if basic.pb %} · PB {{ basic.pb }}{% endif %}
+      </div>
+    </div>
+    <span class="score-badge {% if score_val >= 60 %}bullish{% elif score_val >= 40 %}neutral{% else %}bearish{% endif %}" style="margin:0;">
+      ⭐ {{ score_val }}分 · {{ score.rating|default('--') }}
+    </span>
+  </div>
+
+  {% if sigs %}
+  <div style="padding:6px 16px;display:flex;flex-wrap:wrap;gap:6px;">
+    {% for sg in sigs[:6] %}<span class="signal-badge positive" style="margin:0;">✅ {{ sg }}</span>{% endfor %}
+  </div>
+  {% endif %}
+  {% if warns %}
+  <div style="padding:6px 16px;display:flex;flex-wrap:wrap;gap:6px;">
+    {% for w in warns[:6] %}<span class="signal-badge negative" style="margin:0;">⚠️ {{ w }}</span>{% endfor %}
+  </div>
+  {% endif %}
+
+  {% set bp = s.buy_point|default('') %}
+  {% set sh = s.sell_hint|default('') %}
+  {% if bp or sh %}
+  <div style="padding:8px 16px 12px;font-size:12px;line-height:1.6;border-top:1px solid var(--card-border);">
+    {% if bp %}<div>🎯 买点：{{ bp }}</div>{% endif %}
+    {% if sh %}<div>💰 卖点：{{ sh }}</div>{% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endfor %}
+
+<div class="footer">
+  Stock Analysis Pro · 自选股批量分析<br>
+  数据仅供参考，不构成投资建议
+</div>
+{% endblock %}

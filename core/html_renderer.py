@@ -48,8 +48,14 @@ def render(data: dict, template_name: str, output_dir: str = None, filename: str
         ts = now.strftime("%Y%m%d_%H%M")
         filename = f"{template_name}_{symbol}_{ts}.html"
 
+    # 上下文同时提供 data(整体) 与展平的顶层键, 兼容两类模板写法:
+    #   - data.get('x') / data.xxx  (stock_report / concept_report 等)
+    #   - 裸 x (options_report / 部分独立模板按展平约定书写)
+    ctx = dict(data)
+    ctx["data"] = data
+    ctx["now"] = now
     filepath = os.path.join(output_dir, filename)
-    html = template.render(data=data, now=now)
+    html = template.render(**ctx)
 
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(html)

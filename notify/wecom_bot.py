@@ -22,6 +22,13 @@ import hashlib
 import subprocess
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 让 core.commands 等顶层模块可导入(以项目根为准)
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+# 统一指令注册表: 与调度器共用同一份命令定义, 避免漂移
+from core.commands import expand_args, is_cli
+
 ENV_PATH = os.path.join(BASE_DIR, ".env")
 CHATID_PATH = os.path.join(BASE_DIR, "data", "wecom_chatid.txt")
 
@@ -63,78 +70,87 @@ def get_bot_creds():
 # 命令解析: 把用户自然语言映射为 core/cli.py 的参数
 # ---------------------------------------------------------------------------
 def parse_command(text):
-    """返回 (args_list, label) 或 (None, help_text) 表示需要直接回复帮助。"""
+    """返回 (command_key, extra_args, label) 或 (None, [], help_text) 表示需直接回复。
+
+    command_key 为 core.commands.COMMANDS 的键; extra_args 为追加参数
+    (如股票代码 / --no-push / --brief)。实际 argv 由 handle_message 经
+    core.commands.expand_args 统一展开, 与调度器共用同一份命令定义。
+    """
     t = (text or "").strip()
     if not t:
-        return None, _HELP
+        return None, [], _HELP
 
     low = t.lower()
 
     # 帮助
     if low in ("help", "帮助", "菜单", "?", "？", "命令"):
-        return None, _HELP
+        return None, [], _HELP
 
     # 自选股批量分析 (放在"持仓/自选"之前, 避免被精确匹配抢先)
     if low in ("自选分析", "分析全部", "批量分析", "analyze-all", "自选股分析", "全部分析"):
-        return ["analyze-all"], "自选股批量分析"
+        return "analyze_all", [], "自选股批量分析"
 
     # 清空自选股
     if low in ("清空自选", "清空自选股", "clear", "清空"):
-        return ["clear"], "清空自选股"
+        return "clear", [], "清空自选股"
 
-    # 加自选股: "加自选 600519" / "添加 600000" / "加入自选 600519" / "加 600519" / "add 600519"
-    # 支持批量: "批量加自选 600519 600000 300750" / "加自选 600519 600000"
+    # 加自选股: "加自选 600519" / "添加 600000" ... 支持批量
     import re as _re
     _ADD_KW = ("加自选", "添加", "加入自选", "自选加", "加自选股", "批量加自选", "批量添加", "批量加入")
     if any(k in low for k in _ADD_KW) or low.startswith("加 ") or low.startswith("add "):
         _codes = _re.findall(r"\d{4,6}", t)
         if _codes:
-            return ["add"] + _codes, f"加自选 {len(_codes)} 只"
-        return None, "请提供股票代码，例如：加自选 600519 600000"
+            return "add", _codes, f"加自选 {len(_codes)} 只"
+        return None, [], "请提供股票代码，例如：加自选 600519 600000"
 
-    # 持仓 / 自选
-    if low in ("持仓", "自选", "portfolio", "watchlist", "自选股"):
-        return ["portfolio"], "持仓"
+    # 自选股列表 (统一数据源: stock_pool.json 的 watch 标记)
+    if low in ("自选", "watchlist", "自选股", "我的自选", "自选列表", "看看自选"):
+        return "list", [], "自选股列表"
+
+    # 持仓盈亏 (config.yaml 真实持仓, 独立于自选池)
+    if low in ("持仓", "持仓盈亏", "我的持仓", "portfolio", "盈亏", "我的盈亏"):
+        return "portfolio", [], "持仓盈亏"
 
     # 复盘
     if low in ("复盘", "review", "每日复盘", "收盘复盘"):
-        return ["review"], "每日复盘"
+        return "review", [], "每日复盘"
 
-    # 每日决策简报 (选股→跟踪→评级变化→买卖推荐 的精简操作清单)
+    # 每日决策简报
     if any(k in low for k in ("决策", "操作建议", "操作清单", "简报", "买卖", "买入推荐", "卖出推荐", "今日操作")):
-        return ["decision", "--no-browser"], "每日决策简报"
+        return "decision", [], "每日决策简报"
 
-    # 仪表盘 (Web 前端查看全貌, 非推送类指令, 提示用户访问本地地址)
+    # 仪表盘 (非推送类, 提示浏览器访问)
     if any(k in low for k in ("仪表盘", "看板", "dashboard", "面板", "驾驶舱")):
-        return None, ("请在浏览器中访问仪表盘: http://localhost:8500\n"
-                      "或在本机运行: python core/cli.py dashboard")
+        return None, [], ("请在浏览器中访问仪表盘: http://localhost:8500\n"
+                          "或在本机运行: python core/cli.py dashboard")
 
     # 每周热点选股流水线 (须在"概念/热点"之前, 避免被裸"热点"抢先)
     if any(k in low for k in ("热点选股", "每周热点", "周报选股", "周热点")):
-        return ["__weekly_hotspot__"], "每周热点选股"
+        return "weekly_hotspot", ["--no-push"], "每周热点选股"
 
     # 概念板块 (含 "分析热点"/"看题材" 等组合词)
     if any(k in low for k in ("概念", "concept", "热点", "题材")):
-        return ["concept", "--stage", "list", "--top", "10"], "概念板块扫描"
+        return "concept", [], "概念板块扫描"
+
+    # 突破扫描 (纯选股扫描, 与"热点选股"全流程区分)
+    if any(k in low for k in ("突破", "突破扫描", "breakthrough")):
+        return "breakthrough", [], "突破扫描"
 
     # 期权
     if low in ("期权", "options", "etf期权", "etf"):
-        return ["options"], "ETF 期权扫描"
+        return "options", [], "ETF 期权扫描"
 
     # 大盘
     if low in ("大盘", "market", "行情"):
-        return ["market"], "大盘概览"
+        return "market", [], "大盘概览"
 
     # 分析: "分析 600519" / "600519" / 直接 6 位数字
-    # 注意: 必须校验提取出的 code 是合法股票代码, 否则不进入分析分支
-    # (否则 "分析热点" 会被 startswith("分析") 命中, 截出 "热点" 当代码而崩溃)
     code = None
     if low.startswith("分析") or low.startswith("analyze"):
         code = t.split(None, 1)[1].strip() if " " in t else t[2:].strip()
     elif low.startswith("查") or low.startswith("看看"):
         code = t.split(None, 1)[1].strip() if " " in t else ""
     else:
-        # 纯数字视为股票代码
         maybe = t.replace(" ", "")
         if maybe.isdigit() and 4 <= len(maybe) <= 6:
             code = maybe
@@ -142,16 +158,14 @@ def parse_command(text):
     if code:
         code = code.split()[0].strip()
         if _is_valid_code(code):
-            # 支持 "600519 --brief" 之类尾随参数
             extra = []
             if "--brief" in low:
                 extra.append("--brief")
             if "--json" in low:
                 extra.append("--json")
-            # 机器人场景跳过 Playwright 浏览器采集，改走直连 (快且 Windows 不崩)
-            return ["analyze", code, "--no-browser"] + extra, f"分析 {code}"
+            return "analyze", [code] + extra, f"分析 {code}"
 
-    return None, f"未能识别指令：「{t}」\n\n{_HELP}"
+    return None, [], f"未能识别指令：「{t}」\n\n{_HELP}"
 
 
 def _is_valid_code(code: str) -> bool:
@@ -177,7 +191,9 @@ _HELP = """📈 **Stock Analysis Pro 使用指南**
 • `复盘` / `review` —— 每日复盘
 • `期权` / `options` —— ETF 期权机会扫描
 • `大盘` / `market` —— 大盘概览
-• `持仓` / `自选` —— 持仓/自选股
+• `自选` / `watchlist` —— 自选股列表(stock_pool 的 watch)
+• `持仓盈亏` / `portfolio` —— 我的真实持仓(成本/股数/盈亏)
+• `突破扫描` / `突破` —— 突破形态选股(HTML 报告)
 • `帮助` —— 显示本菜单
 
 示例：分析 600519"""
@@ -345,23 +361,17 @@ async def handle_message(client, frame):
     if target:
         save_chat_id(target)
 
-    args, label = parse_command(content)
+    key, extra, label = parse_command(content)
     stream_id = _GEN_REQ_ID("stream")
 
-    if args is None:
-        # 直接回复 (帮助/无法识别)
+    if key is None:
+        # 直接回复 (帮助/无法识别/仪表盘提示)
         await client.reply_stream(frame, stream_id, label, True)
         return
 
-    # 支持 HTML 报告的指令: 自动追加 --html, 生成报告文件后一并发送
-    _HTML_CMDS = {"market", "review", "concept", "options", "analyze", "analyze-all", "decision"}
-    # 机器人场景跳过 Playwright 浏览器采集 (快且 Windows 不崩); 概念走 list 阶段本就无需浏览器, 不加
-    _NO_BROWSER_CMDS = {"market", "review", "options", "analyze", "analyze-all", "decision"}
-    run_args = list(args)
-    if args and args[0] in _HTML_CMDS:
-        run_args.append("--html")
-    if args and args[0] in _NO_BROWSER_CMDS:
-        run_args.append("--no-browser")
+    # 统一指令展开: 经 core.commands 展开为 argv(已含 --html / --no-browser 提示)
+    # 与调度器共用同一份命令定义, 不再各写各的 argv
+    argv = expand_args(key, extra)
 
     # 先发"分析中"状态 (无论 append/replace 语义都自然)
     try:
@@ -369,15 +379,14 @@ async def handle_message(client, frame):
     except Exception:
         pass
 
-    # 每周热点选股流水线 (独立脚本, 不走 cli.py; --no-push + --html 由 bot 统一回传/附文件)
-    is_weekly = bool(args and args[0] == "__weekly_hotspot__")
-    if is_weekly:
-        text, err = await run_script("plans/weekly_hotspot.py", ["--no-push", "--html"] + args[1:])
+    # cli 类(入口 core/cli.py)走 run_cli(自动剥掉前缀); 脚本类走 run_script
+    if is_cli(key):
+        text, err = await run_cli(argv[1:])
     else:
-        text, err = await run_cli(run_args)
+        text, err = await run_script(argv[0], argv[1:])
 
     if err and not text:
-        text = (f"⚠️ 热点选股失败：" if is_weekly else "⚠️ 分析失败：") + f"\n{err[:1500]}"
+        text = (f"⚠️ 热点选股失败：" if key == "weekly_hotspot" else "⚠️ 分析失败：") + f"\n{err[:1500]}"
 
     # 统一解析 HTML 报告路径 (各入口均输出 HTML_REPORT:<path> 约定)
     html_path = None

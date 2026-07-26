@@ -18,25 +18,33 @@ for _stream in (sys.stdout, sys.stderr):
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 DATA_DIR = os.path.join(BASE_DIR, "data")
-WATCHLIST_PATH = os.path.join(DATA_DIR, "watchlist.json")
+from plans.stock_pool import (
+    load_pool as _sp_load_pool,
+    save_pool as _sp_save_pool,
+    add_watch as _sp_add_watch,
+    remove_watch as _sp_remove_watch,
+    list_watch as _sp_list_watch,
+    clear_watch as _sp_clear_watch,
+)
 
 
 def get_watchlist():
-    if not os.path.exists(WATCHLIST_PATH):
-        return []
-    with open(WATCHLIST_PATH, "r") as f:
-        return json.load(f)
+    """返回人工自选股代码列表 (统一数据源: stock_pool.json 中 watch=True)."""
+    return [e["symbol"] for e in _sp_list_watch()]
 
 
 def get_watchlist_effective():
-    """返回实际自选股; 若文件不存在/为空, 返回空列表 (不再内置默认清单)。"""
+    """返回实际自选股; 空则返回空列表 (统一数据源: stock_pool.json)."""
     return get_watchlist()
 
 
 def save_watchlist(lst):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(WATCHLIST_PATH, "w") as f:
-        json.dump(lst, f, indent=2)
+    """兼容旧调用: 把代码列表同步为股票池的 watch 标记 (覆盖式). 新代码请用 add_watch."""
+    syms = set(str(c).strip() for c in (lst or []) if c)
+    pool = _sp_load_pool()
+    for e in pool.get("entries", []):
+        e["watch"] = e.get("symbol") in syms
+    _sp_save_pool(pool)
 
 
 def print_summary(data):
@@ -105,7 +113,7 @@ def main():
                 print("Error: stock code required", file=sys.stderr)
                 sys.exit(1)
             from plans.stock_analysis import run
-            data = run(args.symbol, use_browser=not args.no_browser)
+            data = run(args.symbol[0], use_browser=not args.no_browser)
             if args.html:
                 print_report(data)
                 from core.html_renderer import render
@@ -134,7 +142,7 @@ def main():
         elif args.command == "analyze-all":
             wl = get_watchlist_effective()
             if not wl:
-                print("ℹ️ 自选股为空 (data/watchlist.json), 请先用 `add` 添加或运行热点选股流程。", file=sys.stderr)
+                print("ℹ️ 自选股为空 (stock_pool 中无 watch=True), 请先用 `add` 添加或运行热点选股流程。", file=sys.stderr)
                 return
             from plans.stock_analysis import run
             if args.html:
@@ -174,15 +182,16 @@ def main():
             if not args.symbol:
                 print("Error: stock code required", file=sys.stderr)
                 sys.exit(1)
-            wl = get_watchlist()
             added = []
             for sym in args.symbol:
-                if sym not in wl:
-                    wl.append(sym)
+                sym = sym.strip()
+                if not sym:
+                    continue
+                before = get_watchlist()
+                _sp_add_watch(sym)
+                if sym not in before:
                     added.append(sym)
-            if added:
-                save_watchlist(wl)
-            print(f"Added {len(added)}/{len(args.symbol)}: {', '.join(added) or '(均已存在)'}")
+            print(f"Added {len(added)}/{len(args.symbol)} 到自选(watch): {', '.join(added) or '(均已存在)'}")
             if len(added) != len(args.symbol):
                 dup = [s for s in args.symbol if s not in added]
                 print(f"  (已跳过重复: {', '.join(dup)})")
@@ -191,25 +200,26 @@ def main():
             if not args.symbol:
                 print("Error: stock code required", file=sys.stderr)
                 sys.exit(1)
-            wl = get_watchlist()
             removed = []
             for sym in args.symbol:
-                if sym in wl:
-                    wl.remove(sym)
+                sym = sym.strip()
+                if not sym:
+                    continue
+                if sym in get_watchlist():
+                    _sp_remove_watch(sym)
                     removed.append(sym)
-            if removed:
-                save_watchlist(wl)
-            print(f"Removed {len(removed)}/{len(args.symbol)}: {', '.join(removed) or '(均不在列表)'}")
+            print(f"Removed {len(removed)}/{len(args.symbol)}: {', '.join(removed) or '(均不在自选)'}")
 
         elif args.command == "list":
-            wl = get_watchlist()
-            print(f"Watchlist ({len(wl)} stocks):")
-            for s in wl:
-                print(f"  {s}")
+            items = _sp_list_watch()
+            print(f"自选股(watch) ({len(items)} 只):")
+            for e in items:
+                print(f"  {e.get('symbol')} {e.get('name', '')} | {e.get('stage', '')} "
+                      f"评分{e.get('score', '')} | 持仓{e.get('entered', False)}")
 
         elif args.command == "clear":
-            save_watchlist([])
-            print("Watchlist cleared (0 stocks).")
+            n = _sp_clear_watch()
+            print(f"自选股(watch) 已清空 (移除 {n} 只, 余 0 只)")
 
         elif args.command == "review":
             from plans.daily_report import run as run_review, format_report as format_review

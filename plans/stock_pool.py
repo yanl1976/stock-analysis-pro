@@ -9,11 +9,12 @@
   - refresh_stock_pool: 每日收盘后用最新 K 线重算数值关卡 + 移动止损 + 重评分,
     写回池, 供 intraday_watch 盘中监控 + weekly_hotspot 报告展示。
 
-自选股 (data/watchlist.json) 改为纯人工维护, 本模块绝不写入它。
+自选股统一为股票池的 watch 标记 (data/stock_pool.json 中 watch=True), 不再有独立 watchlist.json;
+  add_watch/remove_watch/list_watch/clear_watch 管理人工自选, 与机器选股共用同一份池。
 
 用法:
-  python plans/stock_pool.py --migrate-watchlist      # 把现有 watchlist.json 移入池
-  python plans/stock_pool.py --add symbol,name,概念   # 手动加一只
+  python plans/stock_pool.py --migrate-watchlist      # 把现有 watchlist.json 移入池并标记 watch=True
+  python plans/stock_pool.py --add symbol,name,概念   # 手动加一只(标记 watch=True)
   python plans/stock_pool.py --refresh               # 每日重算关卡+移动止损
   python plans/stock_pool.py --expire                # 清理过期
   python plans/stock_pool.py --list                  # 查看池
@@ -24,12 +25,86 @@ import json
 import argparse
 from datetime import datetime
 
+# 强制 stdout/stderr 使用 UTF-8，避免 Windows 控制台默认 gbk 无法编码 ✓/¥ 等字符崩溃
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 DATA_DIR = os.path.join(BASE_DIR, "data")
 POOL_PATH = os.path.join(DATA_DIR, "stock_pool.json")
 WATCHLIST_PATH = os.path.join(DATA_DIR, "watchlist.json")
+CODE_NAME_PATH = os.path.join(DATA_DIR, "code_names.json")
 TTL_DAYS = 30  # 自然日, 约 20 交易日
+
+_CODE_NAME_MAP = None  # 进程内缓存
+
+
+def _load_code_name_map():
+    """返回 {code: name} 全市场映射, 优先读本地缓存, 缺失则从 akshare 拉取并落盘.
+    网络不可用时回退到现有池里已解析的名称, 再不行返回空 dict (调用方按 symbol 兜底)."""
+    global _CODE_NAME_MAP
+    if _CODE_NAME_MAP is not None:
+        return _CODE_NAME_MAP
+    m = {}
+    if os.path.exists(CODE_NAME_PATH):
+        try:
+            m = json.load(open(CODE_NAME_PATH, encoding="utf-8"))
+        except Exception:
+            m = {}
+    # 池内已解析的名称(name != symbol)也并入, 作为离线兜底
+    try:
+        for e in load_pool().get("entries", []):
+            s, n = e.get("symbol"), e.get("name")
+            if s and n and n != s and s not in m:
+                m[s] = n
+    except Exception:
+        pass
+    if not m:  # 首次无缓存: 联网拉全市场代码表 (akshare 偶发残缺, 需校验规模)
+        try:
+            import akshare as ak
+            df = ak.stock_info_a_code_name()
+            full = {str(r["code"]): str(r["name"]) for _, r in df.iterrows()}
+            if len(full) >= 3000:  # 拒绝残缺子集, 避免把代码当名称缓存
+                m = full
+                json.dump(m, open(CODE_NAME_PATH, "w", encoding="utf-8"),
+                          ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+    _CODE_NAME_MAP = m
+    return m
+
+
+def _resolve_name_via_tencent(symbol: str) -> str:
+    """单只股票走腾讯行情 qt.gtimg.cn 解析名称 (高可靠, 作为 akshare 缺失时的回退)."""
+    try:
+        from collectors.quote import _prefix_symbol
+        import requests
+        sym = _prefix_symbol(symbol)
+        r = requests.get(f"https://qt.gtimg.cn/q={sym}", timeout=10)
+        r.encoding = "gbk"
+        for line in r.text.strip().split(";"):
+            if "=" not in line or "unknown" in line:
+                continue
+            _, data = line.split("=", 1)
+            parts = data.strip('"').split("~")
+            if len(parts) >= 2 and parts[1]:
+                return parts[1]
+    except Exception:
+        pass
+    return symbol
+
+
+def _resolve_name(symbol: str) -> str:
+    """按代码解析股票名称: 先查 akshare 全市场映射, 缺失则腾讯单股查询, 再不行回退代码."""
+    symbol = str(symbol).strip()
+    name = _load_code_name_map().get(symbol)
+    if name:
+        return name
+    return _resolve_name_via_tencent(symbol)
 
 
 def _today():
@@ -154,6 +229,7 @@ def add_entries(new_entries: list, reason_default: str = "策略选股") -> int:
                 "name": ne.get("name", e.get("name", sym)),
                 "concepts": ne.get("concepts", e.get("concepts", [])),
                 "reason_tag": ne.get("reason", e.get("reason_tag", reason_default)),
+                "watch": ne.get("watch", e.get("watch", False)),
                 "stage": lvl.get("stage", e.get("stage")),
                 "score": lvl.get("score", e.get("score")),
                 "rating": lvl.get("rating", e.get("rating")),
@@ -196,6 +272,7 @@ def add_entries(new_entries: list, reason_default: str = "策略选股") -> int:
                 "resistance": lvl.get("resistance"),
                 "support": lvl.get("support"),
                 "highest_since_entry": lvl.get("price"),
+                "watch": bool(ne.get("watch", False)),
                 "entered": False,
                 "exited": False,
                 "last_refresh": today,
@@ -205,6 +282,66 @@ def add_entries(new_entries: list, reason_default: str = "策略选股") -> int:
             added += 1
     save_pool(pool)
     return added
+
+
+# ── 人工自选股 (watch 标记) ────────────────────────────────────────────
+def add_watch(symbol: str, name: str = None, concepts: list = None,
+              reason: str = "人工自选(CLI add)") -> int:
+    """人工自选股: 加入股票池并标记 watch=True (与机器选股共用同一份池)."""
+    symbol = str(symbol).strip()
+    if not symbol:
+        return 0
+    new_entries = [{
+        "symbol": symbol,
+        "name": name or _resolve_name(symbol),
+        "concepts": concepts or [],
+        "reason": reason,
+        "watch": True,
+    }]
+    return add_entries(new_entries, reason_default=reason)
+
+
+def remove_watch(symbol: str) -> int:
+    """取消人工自选: watch 标记置 False; 若该票本就是纯自选(非持仓且无评级)则删除."""
+    symbol = str(symbol).strip()
+    pool = load_pool()
+    kept, changed = [], False
+    for e in pool.get("entries", []):
+        if e.get("symbol") == symbol:
+            e["watch"] = False
+            if not e.get("entered") and (e.get("rating") in (None, "暂避")
+                                          or e.get("score") is None):
+                changed = True  # 纯自选条目, 直接移除
+                continue
+            changed = True
+        kept.append(e)
+    if changed:
+        pool["entries"] = kept
+        save_pool(pool)
+    return 1 if changed else 0
+
+
+def list_watch() -> list:
+    """返回 watch=True 的人工自选股条目列表 (统一数据源)."""
+    pool = load_pool()
+    return [e for e in pool.get("entries", []) if e.get("watch")]
+
+
+def clear_watch() -> int:
+    """清空全部人工自选 (watch 置 False; 纯自选条目删除). 返回移除条数."""
+    pool = load_pool()
+    kept, removed = [], 0
+    for e in pool.get("entries", []):
+        if e.get("watch"):
+            e["watch"] = False
+            if not e.get("entered") and (e.get("rating") in (None, "暂避")
+                                          or e.get("score") is None):
+                removed += 1
+                continue
+        kept.append(e)
+    pool["entries"] = kept
+    save_pool(pool)
+    return removed
 
 
 def refresh_stock_pool(verbose: bool = True) -> int:
@@ -339,22 +476,46 @@ def migrate_watchlist(verbose: bool = True) -> int:
         if verbose:
             print("  (watchlist.json 为空, 跳过)")
         return 0
-    # 取名称: 尝试从已有池/行情; 这里仅 symbol, 名称留空由 refresh 补
-    new_entries = [{"symbol": str(c).strip(), "name": str(c).strip(),
-                   "concepts": [], "reason": "迁移自自选股(人工→策略池)"} for c in codes]
+    # 取名称: 优先从 akshare 代码表解析真实名称, 解析不到才回退为代码
+    new_entries = [{"symbol": str(c).strip(), "name": _resolve_name(str(c).strip()),
+                   "concepts": [], "reason": "迁移自自选股(人工→策略池)",
+                   "watch": True} for c in codes]
     added = add_entries(new_entries, reason_default="迁移自自选股")
     # 清空人工自选股 (此后由用户自行维护)
     with open(WATCHLIST_PATH, "w", encoding="utf-8") as f:
         json.dump([], f, ensure_ascii=False)
     if verbose:
-        print(f"  ✓ 已迁移 {added} 只到股票池, watchlist.json 已清空(改为人工维护)")
+        print(f"  ✓ 已迁移 {added} 只到股票池, 统一数据源改为 stock_pool 的 watch 标记")
     return added
+
+
+def backfill_names(verbose: bool = True) -> int:
+    """回填池中 name 与 symbol 相同的「伪名称」条目为真实名称(迁移遗留). 返回修正条数."""
+    pool = load_pool()
+    fixed = 0
+    for e in pool.get("entries", []):
+        n = e.get("name")
+        if n and n == e.get("symbol"):
+            real = _resolve_name(e["symbol"])
+            if real != e["symbol"]:
+                e["name"] = real
+                fixed += 1
+                if verbose:
+                    print(f"  ✓ {e['symbol']} → {real}")
+    if fixed:
+        save_pool(pool)
+        if verbose:
+            print(f"  ✓ 已回填 {fixed} 只名称")
+    elif verbose:
+        print("  (无需回填)")
+    return fixed
 
 
 def main():
     ap = argparse.ArgumentParser(description="策略股票池管理")
     ap.add_argument("--migrate-watchlist", action="store_true", help="迁移 watchlist.json → 股票池")
     ap.add_argument("--add", type=str, default="", help="手动加一只: symbol,name,概念1/概念2")
+    ap.add_argument("--backfill-names", action="store_true", help="回填 name=代码 的错误名称")
     ap.add_argument("--refresh", action="store_true", help="每日重算关卡+移动止损")
     ap.add_argument("--expire", action="store_true", help="清理过期")
     ap.add_argument("--list", action="store_true", help="查看池")
@@ -365,16 +526,19 @@ def main():
     if args.add:
         parts = args.add.split(",")
         sym = parts[0].strip()
-        name = parts[1].strip() if len(parts) > 1 else sym
+        name = parts[1].strip() if len(parts) > 1 else None
         cons = parts[2].split("/") if len(parts) > 2 and parts[2] else []
-        add_entries([{"symbol": sym, "name": name, "concepts": cons,
+        add_entries([{"symbol": sym, "name": name or _resolve_name(sym), "concepts": cons,
                       "reason": "手动加入"}])
-        print(f"  ✓ 已加入 {sym}({name})")
+        print(f"  ✓ 已加入 {sym}({name or _resolve_name(sym)})")
+    if args.backfill_names:
+        backfill_names()
     if args.refresh:
         refresh_stock_pool()
     if args.expire:
         expire_pool()
-    if args.list or not (args.migrate_watchlist or args.add or args.refresh or args.expire):
+    if args.list or not (args.migrate_watchlist or args.add or args.backfill_names
+                         or args.refresh or args.expire):
         pool = load_pool()
         print(f"股票池更新于 {pool.get('updated')}, 共 {len(pool['entries'])} 只:")
         for e in pool["entries"]:

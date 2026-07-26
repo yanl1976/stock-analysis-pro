@@ -316,10 +316,11 @@ def api_pipeline():
     result["pool_hot_type_dist"] = dict(Counter(
         e.get("hot_type") for e in entries if e.get("hot_type")).most_common())
 
-    # 7g. 自选股(持仓)完整数据
-    held_entries = [e for e in entries if e.get("entered")]
+    # 7g. 自选股(watch=True)完整数据
+    held_entries = [e for e in entries if e.get("watch")]
     result["watchlist"] = [{
         "symbol": e.get("symbol"),
+        "watch": bool(e.get("watch")),
         "name": e.get("name"),
         "stage": e.get("stage"),
         "score": e.get("score"),

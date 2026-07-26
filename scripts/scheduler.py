@@ -89,27 +89,24 @@
   python scripts/scheduler.py --daemon          # 常驻循环(默认, 注册后自动运行)
 
 常用示例:
-  python scripts/scheduler.py --list            # 查看全部 9 个任务的时刻与说明
-  python scripts/scheduler.py --run-once 宏观分析   # 手动跑一次宏观分析(不等待定时)
+  python scripts/scheduler.py --list            # 查看全部任务(窗口/时间/间隔/交易日)
+  python scripts/scheduler.py --run-once 盘前播报   # 手动跑一次盘前播报(不等待定时)
   python scripts/scheduler.py --check           # 确认 python/依赖/企微推送/落盘目录就绪
 
 =====================================================================
-三、计划表 (9 个任务)
+三、计划表 (7 个任务 = 4 推送窗口 + 3 后台, 已深度整合精简)
 =====================================================================
-  任务名              时间             间隔         仅交易日  通知   说明
+  推送窗口    任务名        时间      间隔       仅交易日  通知   说明
   ──────────────────────────────────────────────────────────────────────────
-  东财Cookie刷新      07:30            每周一       否        否     刷新东财匿名会话 Cookie(概念板块依赖)
-  落盘数据更新        08:00            每个交易日   是        是     增量刷新全市场 A 股日线 K 线落盘
-  宏观分析            08:30            每个交易日   是        是     国际+国内+涨停池 → 综合研判(盘前定调)
-  盘中自选异动监控    09:30-11:30/13:00-15:00  盘中每15分  是     是     盘中扫描自选股+大盘, 异动推企微
-  盘中热点选股(突破扫描) 09:30-11:30/13:00-15:00  盘中每15分  是     是     盘中跑突破扫描, 实时价筛选突破/即将启动个股推企微
-  盘中S14选股(三角形突破) 14:45         盘中           是    是     盘中用S14同源detect_triangle扫全市场三角形突破, 实时价判突破触发/即将突破推企微
-  概念板块扫描        15:45            每个交易日   是        是     收盘后拉概念板块涨幅榜单
-  热点选股(突破扫描)  16:00            每个交易日   是        是     热点板块成分股形态识别选股
-  自选分析            16:30            每个交易日   是        是     遍历 watchlist.json 多维评分
-  每日复盘            17:00            每个交易日   是        是     全市场复盘报告
-  周热点回测          18:00            每周五       是        否     周度热点板块回测
-  数据质量巡检        23:00            每天         否        否     扫描落盘 K 线(stale/short 统计)
+  -          东财Cookie刷新  08:30    每周一     否        否     刷新东财匿名会话 Cookie(概念板块依赖)
+  -          数据质量巡检    23:00    每天       否        否     扫描落盘 K 线(stale/short 统计)
+  -          周热点回测      周五18:00 每周五     是        否     周度热点板块回测(无推送)
+  盘前        盘前播报        08:30    每个交易日 是        是     落盘更新 + 宏观研判
+  早盘        早盘播报        11:30    每个交易日 是        是     自选异动 + 热点突破(轻量快照)
+  午盘        午盘播报        15:00    每个交易日 是        是     自选异动 + 热点突破 + S14 三角形
+  盘后        盘后播报        17:15    每个交易日 是        是     概念扫描→热度追踪→突破选股→池刷新→自选分析→复盘→决策
+  注: 4 个推送窗口各自把多任务合并为一条流水线(命令键见 core.commands),
+       输出汇总后统一推送一次企微, 每天仅 4 条定时推送。
 
 =====================================================================
 四、注意事项
@@ -118,7 +115,7 @@
             (仅影响"仅交易日"任务的跳过, 不影响周末判断)。
   - 网络依赖: 落盘更新 / Cookie / 宏观 / 概念 / 复盘 均触网; 宏观分析依赖
             config/config.yaml 的 proxy.https (akshare 接口需代理)。
-  - 自选分析: 依赖 data/watchlist.json 有内容, 空则跳过。
+  - 自选分析: 依赖 stock_pool 中 watch=True 有内容, 空则跳过。
   - 企微通知: 复用 notify.wecom_bot 底层, 把任务输出末 4000 字符推送到企微会话;
             未配置机器人时静默跳过(不重跑分析)。可用 --check 确认是否启用。
   - 日志: 运行日志写入 data/scheduler.log; 每日执行状态写入 data/scheduler_state.json
@@ -141,6 +138,10 @@ import re
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
+
+# 统一指令注册表: 定时任务与微信 bot 共用一份命令定义, 避免漂移
+# (必须在 sys.path 注入项目根之后导入, 否则 scripts/ 目录下找不到 core 包)
+from core.commands import COMMANDS, expand_args  # noqa: E402
 
 # 强制 stdout/stderr 使用 UTF-8, 避免 Windows 控制台默认 gbk 无法编码 ▶/🔥 等字符
 # (log() 与前台 --run-once 直连 PowerShell 控制台时会触发 UnicodeEncodeError 崩溃)
@@ -191,10 +192,30 @@ def is_trading_day(d: datetime.date) -> bool:
 #   notify          : 是否把执行结果摘要推送到企微(未配置机器人则静默跳过)
 #   enabled         : 是否启用
 # ---------------------------------------------------------------------------
+# ===========================================================================
+# 任务表 —— 唯一的定时执行计划
+#   设计原则(2026-07-25 深度整合): 用户只要求 4 个定时推送窗口
+#     · 盘前 (08:30)  · 早盘 (11:30)  · 午盘 (15:00)  · 盘后 (17:15)
+#   每个窗口把原本分散的多任务合并为一条流水线(commands=命令键列表,
+#   由 core.commands 统一展开), 输出汇总后只推一条企微消息。
+#   另有 3 个后台任务(无推送): Cookie刷新 / 数据质量巡检 / 周热点回测。
+#
+#   name            : 任务名(唯一)
+#   commands        : 统一指令键列表(见 core.commands.COMMANDS), 顺序执行、汇总推送一次
+#   time            : 触发时刻 "HH:MM"
+#   interval        : 间隔描述(仅展示)
+#   window          : 推送窗口标签(盘前/早盘/午盘/盘后), 仅展示
+#   weekday         : 执行的星期集合(Mon=0..Sun=6), None=每天
+#   trading_day_only: True=仅交易日执行
+#   timeout         : 整个流水线超时秒数
+#   notify          : 是否推送企微
+#   enabled         : 是否启用
+# ===========================================================================
 TASKS = [
+    # ---------- 后台任务(无推送) ----------
     {
         "name": "东财Cookie刷新",
-        "cmd": ["python", "scripts/get_em_cookie.py"],
+        "commands": ["cookie"],
         "time": "08:30",
         "interval": "每周一",
         "weekday": [0],
@@ -203,126 +224,6 @@ TASKS = [
         "notify": False,
         "enabled": True,
         "desc": "刷新东财匿名会话 Cookie, 概念板块分析依赖(会过期)",
-    },
-    {
-        "name": "落盘数据更新",
-        "cmd": ["python", "scripts/fetch_all_klines.py", "--max-stale", "7", "--workers", "6"],
-        "time": "08:00",
-        "interval": "每个交易日",
-        "weekday": None,
-        "trading_day_only": True,
-        "timeout": 3600,
-        "notify": True,
-        "enabled": True,
-        "desc": "增量刷新全市场 A 股日线 K 线落盘(跳过 7 天内已有效的)",
-    },
-    {
-        "name": "宏观分析",
-        "cmd": ["python", "plans/macro_report.py"],
-        "time": "08:30",
-        "interval": "每个交易日",
-        "weekday": None,
-        "trading_day_only": True,
-        "timeout": 600,
-        "notify": True,
-        "enabled": True,
-        "desc": "国际宏观+国内经济+涨停池情绪 → 综合研判(盘前定调)",
-    },
-    {
-        "name": "概念板块扫描",
-        "cmd": ["python", "core/cli.py", "concept", "--stage", "list", "--top", "10", "--html"],
-        "time": "15:45",
-        "interval": "每个交易日",
-        "weekday": None,
-        "trading_day_only": True,
-        "timeout": 900,
-        "notify": True,
-        "enabled": True,
-        "desc": "收盘后拉概念板块涨幅榜单(快, 纯 requests)",
-    },
-    {
-        "name": "概念热度追踪",
-        "cmd": ["python", "plans/concept_tracker.py", "--save"],
-        "time": "16:00",
-        "interval": "每个交易日",
-        "weekday": None,
-        "trading_day_only": True,
-        "timeout": 120,
-        "notify": False,
-        "enabled": True,
-        "desc": "每日概念热度追踪: 跨日对比榜单, 计算连续天数/排名变化/热度标签(持续发酵/新兴/衰减等)",
-    },
-    {
-        "name": "热点选股(突破扫描)",
-        "cmd": ["python", "core/cli.py", "breakthrough", "--concepts", "10", "--per", "15", "--to-pool"],
-        "time": "16:00",
-        "interval": "每个交易日",
-        "weekday": None,
-        "trading_day_only": True,
-        "timeout": 1800,
-        "notify": True,
-        "enabled": True,
-        "desc": "热点板块成分股形态识别(突破/即将启动), 选股池产出",
-    },
-    {
-        "name": "自选分析",
-        "cmd": ["python", "core/cli.py", "analyze-all", "--no-browser", "--html"],
-        "time": "16:30",
-        "interval": "每个交易日",
-        "weekday": None,
-        "trading_day_only": True,
-        "timeout": 1800,
-        "notify": True,
-        "enabled": True,
-        "desc": "遍历 data/watchlist.json 全部自选股, 多维评分(技术/基本/资金/舆情)",
-    },
-    {
-        "name": "股票池refresh",
-        "cmd": ["python", "plans/stock_pool.py", "--refresh", "--expire"],
-        "time": "16:30",
-        "interval": "每个交易日",
-        "weekday": None,
-        "trading_day_only": True,
-        "timeout": 600,
-        "notify": True,
-        "enabled": True,
-        "desc": "每日收盘后用最新K线重算股票池数值关卡+移动止损, 清理过期条目(TTL)",
-    },
-    {
-        "name": "每日复盘",
-        "cmd": ["python", "core/cli.py", "review", "--html"],
-        "time": "17:00",
-        "interval": "每个交易日",
-        "weekday": None,
-        "trading_day_only": True,
-        "timeout": 900,
-        "notify": True,
-        "enabled": True,
-        "desc": "全市场复盘报告(指数/板块/情绪/涨跌家数)",
-    },
-    {
-        "name": "每日决策简报",
-        "cmd": ["python", "core/cli.py", "decision", "--html", "--no-browser"],
-        "time": "17:15",
-        "interval": "每个交易日",
-        "weekday": None,
-        "trading_day_only": True,
-        "timeout": 300,
-        "notify": True,
-        "enabled": True,
-        "desc": "决策闭环: 从股票池提炼 买入/卖出/持仓跟踪/评级变化 精简操作清单(主推送)",
-    },
-    {
-        "name": "周热点回测",
-        "cmd": ["python", "plans/weekly_hotspot.py"],
-        "time": "18:00",
-        "interval": "每周五",
-        "weekday": [4],
-        "trading_day_only": True,
-        "timeout": 1800,
-        "notify": False,
-        "enabled": True,
-        "desc": "周度热点板块回测, 校验选股策略有效性",
     },
     {
         "name": "数据质量巡检",
@@ -338,44 +239,79 @@ TASKS = [
         "desc": "扫描落盘 K 线, 统计 stale_accepted(退市/停牌)/short_history(次新), 输出清单",
     },
     {
-        "name": "盘中自选异动监控",
-        "cmd": ["python", "plans/intraday_watch.py", "--threshold", "3"],
-        "time": "09:30",
-        "interval": "盘中每15分",
-        "repeat_minutes": 15,
-        "window": [["09:30", "11:30"], ["13:00", "15:00"]],
+        "name": "周热点回测",
+        "commands": ["weekly_hotspot"],
+        "time": "18:00",
+        "interval": "每周五",
+        "weekday": [4],
+        "trading_day_only": True,
+        "timeout": 1800,
+        "notify": False,
+        "enabled": True,
+        "desc": "周度热点板块回测, 校验选股策略有效性(无推送)",
+    },
+
+    # ---------- 四大推送窗口 ----------
+    {
+        # 盘前: 落盘更新 + 宏观研判, 盘前定调
+        "name": "盘前播报",
+        "window": "盘前",
+        "commands": ["update_klines", "macro"],
+        "time": "08:30",
+        "interval": "每个交易日",
         "weekday": None,
         "trading_day_only": True,
-        "timeout": 120,
+        "timeout": 3600,
         "notify": True,
         "enabled": True,
-        "desc": "盘中每15分扫描自选股+大盘, 异动(涨停/跌停/创日内新高/大幅涨跌/高换手)推企微",
+        "desc": "盘前一条龙: 落盘K线更新 + 宏观研判(国际+国内+涨停池), 综合定调",
     },
     {
-        "name": "盘中热点选股(突破扫描)",
-        "cmd": ["python", "core/cli.py", "breakthrough", "--concepts", "5", "--per", "15"],
-        "time": "09:30",
-        "interval": "盘中每15分",
-        "repeat_minutes": 15,
-        "window": [["09:30", "11:30"], ["13:00", "15:00"]],
+        # 早盘: 出今日可买清单(蒸馏精选, 带买卖点) + 开盘异动跟踪
+        "name": "早盘播报",
+        "window": "早盘",
+        "commands": ["daily_hotspot", "intraday_watch"],
+        "time": "11:30",
+        "interval": "每个交易日",
+        "weekday": None,
+        "trading_day_only": True,
+        "timeout": 1800,
+        "notify": True,
+        "enabled": True,
+        "desc": "早盘: 每日热点蒸馏精选(今日可买清单+买卖点) + 自选/策略池异动",
+    },
+    {
+        # 午盘: 盘中只跟踪策略池信号(买点/止损/止盈触发) + 异动, 不再裸扫候选
+        "name": "午盘播报",
+        "window": "午盘",
+        "commands": ["intraday_watch"],
+        "time": "15:00",
+        "interval": "每个交易日",
         "weekday": None,
         "trading_day_only": True,
         "timeout": 600,
         "notify": True,
         "enabled": True,
-        "desc": "盘中每15分跑突破扫描(热点板块→成分股→形态识别), 盘中实时价筛选突破/即将启动个股推企微",
+        "desc": "午盘: 跟踪策略池交易信号(买点/止损/止盈触发) + 异动, 推一次",
     },
     {
-        "name": "盘中S14选股(三角形突破)",
-        "cmd": ["python", "plans/intraday_select.py", "--top", "15"],
-        "time": "14:45",
-        "interval": "14:45",
+        # 盘后: 收盘跟踪策略池信号(买卖点触发) + 池刷新 + 复盘 + 决策, 不再裸扫候选
+        "name": "盘后播报",
+        "window": "盘后",
+        "commands": [
+            "intraday_watch",      # 收盘跟踪策略池信号(买卖点触发)
+            "pool_refresh",        # 股票池刷新(重算关卡+清理过期)
+            "review",              # 每日复盘
+            "decision",            # 每日决策简报
+        ],
+        "time": "17:15",
+        "interval": "每个交易日",
         "weekday": None,
         "trading_day_only": True,
-        "timeout": 300,
+        "timeout": 4200,
         "notify": True,
         "enabled": True,
-        "desc": "收盘前(14:45)用 S14 同源 detect_triangle 扫全市场对称三角形突破(候选按日缓存), 实时价判突破触发/即将突破, 推企微",
+        "desc": "盘后: 策略池跟踪(收盘触发买卖点) + 池刷新 + 复盘 + 决策, 汇总推一次",
     },
 ]
 
@@ -429,6 +365,24 @@ def _find_html_report(body: str):
     return None
 
 
+_NOISE_RE = re.compile(
+    r"(\d+%\|)"          # tqdm 进度条: " 58%|█████▊  | 11/19 ..."
+    r"|(\bit/s\]?)"      # tqdm 速率尾巴
+    r"|(^HTML_REPORT:)"  # 内部标记行
+    r"|(^\[20\d\d-\d\d-\d\dT.*\[AiBotSDK\])"  # SDK 日志
+)
+
+
+def _clean_lines(body: str):
+    """去掉进度条/内部标记等噪声行, 返回干净文本行列表。"""
+    out = []
+    for l in (body or "").splitlines():
+        if _NOISE_RE.search(l):
+            continue
+        out.append(l)
+    return out
+
+
 def _build_card(title: str, body: str) -> str:
     """构造企微摘要卡片(markdown, 简短): 优先用脚本自带卡片标记, 否则取前若干行预览。"""
     # 1) 脚本显式卡片标记 <<<WECHAT_CARD_START/END>>>
@@ -437,9 +391,8 @@ def _build_card(title: str, body: str) -> str:
         inner = seg.split("<<<WECHAT_CARD_END>>>", 1)[0].strip()
         if inner:
             return f"## 📅 {title}\n\n{inner}"
-    # 2) 去除 HTML_REPORT 标记行, 取前 15 个非空行作为预览
-    lines = [l for l in (body or "").splitlines() if not l.startswith("HTML_REPORT:")]
-    clean = "\n".join(lines).strip()
+    # 2) 去除进度条/标记等噪声行, 取前 15 个非空行作为预览
+    clean = "\n".join(_clean_lines(body)).strip()
     if not clean:
         return f"## 📅 {title}\n\n✅ 已完成，完整明细见附件 HTML"
     preview = "\n".join([l for l in clean.splitlines() if l.strip()][:15])
@@ -466,11 +419,8 @@ def _render_html_report(title: str, body: str):
             seg = body.split("<<<WECHAT_CARD_START>>>", 1)[1]
             summary = seg.split("<<<WECHAT_CARD_END>>>", 1)[0].strip()
 
-        # 完整明细: 去掉内部标记行/分隔符, 保留纯净文本
-        clean = "\n".join(
-            l for l in (body or "").splitlines()
-            if not l.startswith("HTML_REPORT:")
-        )
+        # 完整明细: 去掉内部标记行/进度条噪声/分隔符, 保留纯净文本
+        clean = "\n".join(_clean_lines(body))
         clean = clean.replace("<<<WECHAT_CARD_START>>>", "").replace("<<<WECHAT_CARD_END>>>", "")
         clean = clean.replace(SPLIT_SENTINEL, "\n").strip() or "(无输出)"
 
@@ -571,40 +521,87 @@ PYTHON_TASKS = {"check_data_quality": check_data_quality}
 # ---------------------------------------------------------------------------
 # 任务执行
 # ---------------------------------------------------------------------------
+def _run_sub(cmd_argv, timeout):
+    """运行单条子命令, 返回 (combined_text, rc)。超时抛 subprocess.TimeoutExpired。"""
+    # 强制子进程 UTF-8, 避免 Windows 控制台默认 gbk 导致打印中文/emoji 时
+    # UnicodeEncodeError 崩溃(如 宏观分析 的 '🌐'), 进而使 notify 拿到错误内容
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    proc = subprocess.run(
+        cmd_argv, cwd=BASE_DIR, capture_output=True, text=True,
+        timeout=timeout, env=env, encoding="utf-8", errors="replace",
+    )
+    return (proc.stdout or "") + (proc.stderr or ""), proc.returncode
+
+
+def resolve_task_cmds(t: dict):
+    """把任务里的命令键展开为子进程 argv 列表。
+
+    优先级: commands(统一指令键, 推荐) > cmds(裸 argv, 兼容) > cmd(单条, 兼容)。
+    """
+    cmds = []
+    for k in (t.get("commands") or []):
+        cmds.append(["python"] + expand_args(k))
+    if t.get("cmds"):
+        cmds += t["cmds"]
+    if t.get("cmd"):
+        cmds.append(t["cmd"])
+    return cmds
+
+
 def run_task(t: dict):
     log(f"▶ 开始: {t['name']}  ({t.get('desc','')})")
     try:
+        out_parts = []  # 按子步骤分段, 供 #NO_PUSH# 逐段过滤(合并窗口下不能一票否决)
         if t.get("type") == "python":
             func = PYTHON_TASKS.get(t["func"])
             if not func:
                 raise RuntimeError(f"未知内联任务函数: {t.get('func')}")
             out = func() or ""
+            out_parts.append(out)
             rc = 0
         else:
-            # 强制子进程 UTF-8, 避免 Windows 控制台默认 gbk 导致打印中文/emoji 时
-            # UnicodeEncodeError 崩溃(如 宏观分析 的 '🌐'), 进而使 notify 拿到错误内容
-            env = dict(os.environ)
-            env["PYTHONUTF8"] = "1"
-            env["PYTHONIOENCODING"] = "utf-8"
-            proc = subprocess.run(
-                t["cmd"], cwd=BASE_DIR, capture_output=True, text=True,
-                timeout=t.get("timeout", 3600), env=env,
-                encoding="utf-8", errors="replace",
-            )
-            out = (proc.stdout or "") + (proc.stderr or "")
-            rc = proc.returncode
+            # 深度整合: commands 为统一指令键列表(见 core.commands), 顺序执行、
+            # 输出汇总、只推一次企微, 从根上减少消息轰炸
+            cmds = resolve_task_cmds(t)
+            timeout = t.get("timeout", 3600)
+            out, rc = "", 0
+            for i, c in enumerate(cmds):
+                log(f"  ├ 子步骤 {i+1}/{len(cmds)}: {' '.join(c)}")
+                try:
+                    text, r = _run_sub(c, timeout)
+                except subprocess.TimeoutExpired:
+                    msg = f"⚠️ 子步骤超时(>{timeout}s): {' '.join(c)}"
+                    log(f"✗ {msg}")
+                    out += msg + "\n"
+                    out_parts.append(msg)
+                    rc = -1
+                    if not t.get("continue_on_error", False):
+                        break
+                    continue
+                out += text
+                out_parts.append(text)
+                rc = rc or r
+                if r != 0 and not t.get("continue_on_error", False):
+                    log(f"  └ 子步骤返回非0(rc={r}), 后续步骤跳过(如需继续置 continue_on_error)")
+                    break
         tail = out.strip()[-4000:] if isinstance(out, str) else str(out)[-4000:]
         log(f"✓ 完成: {t['name']} (rc={rc})")
         if tail:
             for ln in tail.splitlines()[-15:]:
                 log(f"    └ {ln}")
         if t.get("notify"):
-            # 子任务可输出 `#NO_PUSH#` sentinel 表示"无合适入选/无内容可推",
-            # 例如 S14 选股当日无三角形候选/无突破触发时, 跳过企微推送避免空报告轰炸
-            if "#NO_PUSH#" in out:
-                log(f"  ⊘ 跳过推送: {t['name']} (输出含 #NO_PUSH#, 无合适入选)")
+            # 子任务可输出 `#NO_PUSH#` sentinel 表示"无合适入选/无内容可推"。
+            # 合并窗口(多子步骤)下按【子步骤】过滤: 仅剔除含 sentinel 的那一段,
+            # 其余段照常推送; 全部段都无内容才整体跳过(避免 S14 空报告吞掉整条午盘)。
+            pushable = [p for p in out_parts if p.strip() and "#NO_PUSH#" not in p]
+            if not pushable:
+                log(f"  ⊘ 跳过推送: {t['name']} (全部子步骤无内容/含 #NO_PUSH#)")
             else:
-                notify(t["name"], out)
+                if len(pushable) < len(out_parts):
+                    log(f"  ⊘ 已剔除 {len(out_parts)-len(pushable)} 个无内容子步骤, 推送其余 {len(pushable)} 段")
+                notify(t["name"], "\n".join(pushable))
         return rc
     except subprocess.TimeoutExpired:
         log(f"✗ 超时: {t['name']} (>{t.get('timeout',3600)}s)")
@@ -678,23 +675,26 @@ def due_tasks(now: datetime.datetime, last: datetime.datetime, state: dict):
 # 子命令
 # ---------------------------------------------------------------------------
 def cmd_list():
-    print(f"{'任务名':<18}{'时间':<16}{'间隔':<12}{'仅交易日':<8}{'通知':<6}  说明")
-    print("-" * 110)
+    push_windows = []
+    for t in TASKS:
+        if t.get("enabled", True) and t.get("notify"):
+            w = t.get("window")
+            if w and w not in push_windows:
+                push_windows.append(w)
+    print(f"推送窗口({len(push_windows)}): " + " / ".join(push_windows))
+    print("-" * 120)
+    print(f"{'窗口':<6}{'任务名':<14}{'时间':<8}{'间隔':<12}{'仅交易日':<8}{'通知':<6}  说明")
+    print("-" * 120)
     for t in TASKS:
         if not t.get("enabled", True):
             continue
         wd = t.get("weekday")
         interval = t.get("interval", "每天")
-        if wd is not None and not t.get("repeat_minutes"):
+        if wd is not None:
             names = ["一", "二", "三", "四", "五", "六", "日"]
             interval = "周" + "/".join(names[i] for i in wd)
-        # 时间列: 盘中重复任务显示时间窗, 否则显示定点时刻
-        if t.get("repeat_minutes"):
-            wins = t.get("window") or []
-            time_col = "/".join(f"{w[0]}-{w[1]}" for w in wins) or t["time"]
-        else:
-            time_col = t["time"]
-        print(f"{t['name']:<16}{time_col:<18}{interval:<12}"
+        time_col = t["time"]
+        print(f"{(t.get('window') or '-'):<6}{t['name']:<14}{time_col:<8}{interval:<12}"
               f"{('是' if t.get('trading_day_only') else '否'):<8}"
               f"{('是' if t.get('notify') else '否'):<6}  {t.get('desc','')}")
 

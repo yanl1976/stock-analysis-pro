@@ -330,14 +330,14 @@ def main():
     results = []
     t0 = time.time()
     for case in TESTS:
-        # analyze-all 依赖非空自选股列表, 测试前临时注入并运行后恢复原状
+        # analyze-all 依赖非空自选股列表, 测试前临时注入 stock_pool 自选(watch) 并运行后恢复原状
         wl_backup = None
         if case["id"] == "analyze_all":
-            wl_path = os.path.join(BASE_DIR, "data", "watchlist.json")
-            wl_backup = (wl_path, open(wl_path, "r", encoding="utf-8").read() if os.path.exists(wl_path) else None)
+            from plans.stock_pool import add_watch, list_watch
+            had = any(e["symbol"] == "600519" for e in list_watch())
+            wl_backup = had
             try:
-                with open(wl_path, "w", encoding="utf-8") as f:
-                    json.dump(["600519"], f)
+                add_watch("600519")
             except Exception:
                 wl_backup = None
 
@@ -347,16 +347,12 @@ def main():
         print(f"  {mark} {rec['status']} ({rec['elapsed']}s) {rec.get('reason','')}", flush=True)
         results.append(rec)
 
-        # 恢复自选股列表
+        # 恢复自选股列表 (watch 标记)
         if wl_backup is not None:
-            wl_path, content = wl_backup
             try:
-                if content is None:
-                    if os.path.exists(wl_path):
-                        os.remove(wl_path)
-                else:
-                    with open(wl_path, "w", encoding="utf-8") as f:
-                        f.write(content)
+                from plans.stock_pool import remove_watch
+                if not wl_backup:  # 原本无 600519 才移除, 避免误删既有自选
+                    remove_watch("600519")
             except Exception:
                 pass
     total = time.time() - t0

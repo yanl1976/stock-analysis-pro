@@ -4,7 +4,7 @@
 
 每 15 分钟(调度器在 09:30-11:30 / 13:00-15:00 窗口内重复触发)扫描:
   - 大盘三大指数(上证/深证/创业板)涨跌
-  - 人工自选股(data/watchlist.json)实时行情 -> 异动标记
+  - 人工自选股(stock_pool.json 中 watch=True)实时行情 -> 异动标记
   - 策略股票池(data/stock_pool.json)实时行情 ->
         * 交易条件触发: 破买点 / 触止损 / 触止盈 (数值关卡, 每日 refresh 更新)
           - 首次命中即写回池标记 entered/exited, 之后不再重复提醒
@@ -36,11 +36,10 @@ SPLIT_SENTINEL = "<<<SPLIT>>>"
 
 
 def load_watchlist() -> list:
-    p = os.path.join(BASE_DIR, "data", "watchlist.json")
-    if not os.path.exists(p):
-        return []
+    """人工自选股 = stock_pool.json 中 watch=True 的代码列表 (统一数据源)."""
     try:
-        return json.load(open(p, encoding="utf-8")) or []
+        from plans.stock_pool import list_watch
+        return [e["symbol"] for e in list_watch()]
     except Exception:
         return []
 
@@ -178,7 +177,7 @@ def main():
     # ---- 人工自选股: 异动 ----
     wl_lines = []
     if not wl:
-        wl_lines.append("⭐ 自选 · 未配置 (data/watchlist.json 为空)")
+        wl_lines.append("⭐ 自选 · 未配置 (stock_pool 中无 watch=True)")
     else:
         movers = []
         for sym in wl:
