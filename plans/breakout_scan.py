@@ -42,6 +42,20 @@ GAP_WARN_DAYS = 10     # 相邻交易日间隔超此值→记为缺口(警告, �
 _KL_FETCH_DAYS = 6000  # 新浪单页最大 datalen, 覆盖上市至今全历史(约6000根日线)
 
 
+def _is_junk_name(name: str) -> bool:
+    """剔除 ST / *ST / 退市 等风险标的，避免污染突破扫描候选池。
+
+    命中规则（名称层，A股风险股命名约定）：
+      - 以 ST 开头（ST / *ST 股，A股风险警示）
+      - 含 *ST（部分接口命名差异）
+      - 含「退」字（退市股常称 XXX退 / 退市XXX）
+    """
+    n = (name or "").upper()
+    if n.startswith("ST") or "*ST" in n or "退" in n:
+        return True
+    return False
+
+
 def _bare(symbol: str) -> str:
     """成分股 symbol 常带 sh/sz/bj 前缀, 而 kline/realtime 内部会再加前缀,
     需先剥掉, 否则变成 szsh600236 之类无效代码。
@@ -196,9 +210,11 @@ def _fetch_full_kline(symbol: str, max_retry: int = 3):
     新浪 getKLineData 支持 datalen 上限约6000根(≈24年), 单次即覆盖全历史。
     返回升序 [{date,open,high,low,close,volume}]。
     """
+    global _NET_KLINE_HITS
     from collectors.quote import kline
     for attempt in range(max_retry):
         try:
+            _NET_KLINE_HITS += 1
             kl = kline(symbol, days=_KL_FETCH_DAYS)
             if kl:
                 return _kl_sanitize(kl)
@@ -232,7 +248,6 @@ def _kline_cached(symbol: str, days: int = 250, force_refresh: bool = False):
             return kl[-days:] if days and days < len(kl) else kl
         if _kl_validate(kl)[0]:
             return kl[-days:] if days and days < len(kl) else kl
-    _NET_KLINE_HITS += 1
     old_last = last_date
     try:
         kl = _fetch_full_kline(symbol)
@@ -303,6 +318,8 @@ def run(top_concepts: int = 5, top_per_concept: int = 15,
             continue
 
         for s in stocks:
+            if _is_junk_name(s.get("name", "")):
+                continue
             sym = _bare(s["symbol"])
             try:
                 kl = _kline_cached(sym) if use_cache else kline(sym, days=250)
@@ -317,6 +334,8 @@ def run(top_concepts: int = 5, top_per_concept: int = 15,
                     price = kl[-1]["close"]
                     chg = 0
                     name = s.get("name", sym)
+                if _is_junk_name(name):
+                    continue
             except Exception as e:
                 if verbose:
                     print(f"    ⚠️ {sym} K线获取失败: {e}")
