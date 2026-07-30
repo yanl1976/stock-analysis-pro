@@ -1,12 +1,12 @@
 {
-  "updated": "2026-07-25",
+  "updated": "2026-07-29",
   "entries": [
     {
       "symbol": "600133",
       "name": "东湖高新",
       "entry_date": "2026-07-25",
       "reason": "热点突破精选(每日)",
-      "reason_tag": "热点突破精选(每日)",
+      "reason_tag": "热点突破精选(每周)",
       "concepts": [
         "金融参股"
       ],
@@ -35,11 +35,55 @@
       "watch": false,
       "entered": false,
       "exited": false,
-      "last_refresh": "2026-07-25",
+      "last_refresh": "2026-07-29",
       "trend": {
         "ma5": 7.488,
         "ma10": 7.561,
         "ma20": 7.723,
+        "bull": false,
+        "steady": false,
+        "above_ma5": true
+      },
+      "hot_type": "波段上涨"
+    },
+    {
+      "symbol": "000626",
+      "name": "远大控股",
+      "entry_date": "2026-07-27",
+      "reason": "热点突破精选(每周)",
+      "reason_tag": "热点突破精选(每周)",
+      "concepts": [
+        "金融参股"
+      ],
+      "stage": "trending",
+      "score": 65,
+      "rating": "关注",
+      "signals": [
+        "布林带极致收缩",
+        "VCP波动收缩×2",
+        "KDJ金叉"
+      ],
+      "price_entry": 6.43,
+      "buy_level": null,
+      "stop_base": null,
+      "stop_level": null,
+      "tp_level": null,
+      "buy_point": "现价¥6.43 跌破/未站稳5日线(MA5≈¥6.34), 等放量收复5日线再考虑低吸",
+      "stop_pct": 0,
+      "position": 8,
+      "take_profit": null,
+      "sell_hint": "涨+12%减仓半仓(¥7.2)锁利; 减仓后破MA20(趋势线)或回撤10%清仓; 破¥5.98止损(减仓后上移保本)",
+      "resistance": 9.64,
+      "support": 6.34,
+      "highest_since_entry": 6.43,
+      "watch": false,
+      "entered": false,
+      "exited": false,
+      "last_refresh": "2026-07-29",
+      "trend": {
+        "ma5": 6.344,
+        "ma10": 6.433,
+        "ma20": 6.417,
         "bull": false,
         "steady": false,
         "above_ma5": true

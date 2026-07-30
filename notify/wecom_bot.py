@@ -297,6 +297,23 @@ def load_chat_id():
     return ""
 
 
+def resolve_chat_id(chatid=None):
+    """解析主动推送目标会话 ID, 优先级: 显式参数 > .env 固定 > 交互记录的会话文件。
+
+    单聊场景 file/chatid 记录的是发送者真实 userid (实测即 'YanLang'), 这是有效目标,
+    必须原样使用, 切勿过滤。仅当取值为空时才返回空串 (调用方应明确报错)。
+    """
+    if chatid:
+        return chatid
+    env = load_env()
+    cid = (env.get("WECOM_PUSH_CHAT_ID")
+           or os.environ.get("WECOM_PUSH_CHAT_ID")
+           or load_chat_id())
+    if not cid:
+        return ""
+    return cid
+
+
 def extract_target(frame):
     """从回调帧提取会话标识 (群 chatid 优先, 否则单聊用户 userid)。
 
@@ -322,7 +339,12 @@ def extract_target(frame):
 _GEN_REQ_ID = None  # 由 build_client 初始化
 
 
-def build_client():
+def build_client(push_mode=False):
+    """构建 aibot 客户端。
+
+    push_mode=True 时仅用于主动推送 (push_markdown_via_bot / send_file_via_bot),
+    不注册 message.text / enter_chat 处理器, 避免推送用的临时连接抢走常驻交互进程的入站消息。
+    """
     global _GEN_REQ_ID
     from aibot import WSClient, WSClientOptions, generate_req_id
 
@@ -337,16 +359,17 @@ def build_client():
     def on_auth():
         print("[WECOM-BOT] 认证成功, 机器人已上线", flush=True)
 
-    @client.on("message.text")
-    async def on_text(frame):
-        await handle_message(client, frame)
+    if not push_mode:
+        @client.on("message.text")
+        async def on_text(frame):
+            await handle_message(client, frame)
 
-    @client.on("event.enter_chat")
-    async def on_enter(frame):
-        await client.reply_welcome(frame, {
-            "msgtype": "markdown",
-            "markdown": {"content": _HELP},
-        })
+        @client.on("event.enter_chat")
+        async def on_enter(frame):
+            await client.reply_welcome(frame, {
+                "msgtype": "markdown",
+                "markdown": {"content": _HELP},
+            })
 
     @client.on("error")
     def on_err(e):
@@ -498,21 +521,38 @@ async def _upload_media(client, filepath: str, msg_type: str = "file") -> str:
 
 
 def send_file_via_bot(filepath: str, chatid: str = None) -> bool:
-    """经 aibot 通道把本地文件作为 file 消息推送到指定会话 (默认 YanLang)。
+    """经 aibot 通道把本地文件作为 file 消息推送到指定会话。
 
     返回 True/False。文件消息在微信里显示为可点击下载/打开的文件。
     """
     if not os.path.exists(filepath):
         print(f"[AIBOT] 文件不存在, 跳过: {filepath}", file=sys.stderr)
         return False
-    chat = chatid or load_chat_id() or "YanLang"
-    client = build_client()
+    chat = resolve_chat_id(chatid)
+    if not chat:
+        print("[AIBOT] 无有效 chat_id, 跳过文件推送 (请在目标会话 @机器人 一次, 或配置 .env 的 WECOM_PUSH_CHAT_ID)", file=sys.stderr)
+        return False
+    client = build_client(push_mode=True)
 
     async def go():
+        _authed = asyncio.Event()
+
+        def _mark_authed():
+            _authed.set()
+
+        try:
+            client.on("authenticated", _mark_authed)
+        except Exception:
+            pass
         await client.connect()
-        await asyncio.sleep(3)  # 等待认证完成
+        try:
+            await asyncio.wait_for(_authed.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            print("[AIBOT] 等待认证超时, 仍尝试发送", file=sys.stderr, flush=True)
         media_id = await _upload_media(client, filepath, "file")
         await client.send_message(chat, {"msgtype": "file", "file": {"media_id": media_id}})
+        # 同 push_markdown_via_bot: 发送后保持连接片刻, 等服务端异步转发完成再断开
+        await asyncio.sleep(4)
         client.disconnect()
         print(f"[AIBOT] 文件已发送 chat={chat} media_id={media_id}")
 
@@ -552,17 +592,38 @@ def push_markdown_via_bot(text, chatid=None):
     if not is_enabled() or not all(get_bot_creds()):
         print("[AIBOT] 未启用/未配置智能机器人, 跳过推送", file=sys.stderr)
         return False
-    chat = chatid or load_chat_id() or "YanLang"
-    client = build_client()
+    chat = resolve_chat_id(chatid)
+    if not chat:
+        print("[AIBOT] 无有效 chat_id, 跳过推送 (请在目标会话 @机器人 一次, 或配置 .env 的 WECOM_PUSH_CHAT_ID)", file=sys.stderr)
+        return False
+    client = build_client(push_mode=True)
 
     async def go():
+        # 等待认证真正完成 (on_auth 回调置位), 避免未认证就发
+        _authed = asyncio.Event()
+        _orig_on_auth = None
+
+        def _mark_authed():
+            _authed.set()
+
+        # 挂一个一次性认证监听 (build_client 内已有 on_auth 打印, 这里仅补事件)
+        try:
+            client.on("authenticated", _mark_authed)
+        except Exception:
+            pass
         await client.connect()
-        await asyncio.sleep(3)  # 等待自动认证完成
+        try:
+            await asyncio.wait_for(_authed.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            print("[AIBOT] 等待认证超时, 仍尝试发送", file=sys.stderr, flush=True)
         for ch in _split_by_bytes(text or "(无内容)", 3800):
             await client.send_message(chat, {
                 "msgtype": "markdown",
                 "markdown": {"content": ch},
             })
+        # 关键: send 后保持连接片刻, 等 aibot 服务端把消息异步转发到企微完成,
+        # 否则立刻 disconnect 会打断转发导致收不到 (实测 ack 已回但用户没收到的根因)
+        await asyncio.sleep(4)
         client.disconnect()
         print(f"[AIBOT] 已推送 {len(_split_by_bytes(text or '(无内容)', 3800))} 条到 {chat}", flush=True)
 

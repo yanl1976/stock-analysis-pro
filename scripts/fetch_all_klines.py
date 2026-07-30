@@ -39,22 +39,57 @@ except Exception as e:
 # 低于此根数视为"不够全"(如旧缓存仅900根), 即使新鲜也重抓升级为全历史
 MIN_FULL_BARS = 2000
 
+# 全市场代码列表本地缓存: 网络抖动时兜底, 避免整条调度流水线崩在"拉列表"这一步
+_ALL_SYMBOLS_CACHE = os.path.join(BASE_DIR, "data", "all_symbols.json")
+_ALL_SYMBOLS_MAX_AGE = 7 * 86400  # 缓存 7 天, 避免每次联网卡顿/断流拖垮调度流水线
+
 
 def get_all_symbols():
-    """返回 [(code6, name), ...] 全市场 A 股"""
-    df = ak.stock_info_a_code_name()
-    code_col = "code" if "code" in df.columns else ("symbol" if "symbol" in df.columns else None)
-    name_col = "name" if "name" in df.columns else None
-    if code_col is None:
-        raise RuntimeError(f"无法识别代码列, columns={list(df.columns)}")
-    out = []
-    for _, row in df.iterrows():
-        code = str(row[code_col]).strip()
-        if not code.isdigit() or len(code) != 6:
-            continue
-        name = str(row[name_col]) if name_col else ""
-        out.append((code, name))
-    return out
+    """返回 [(code6, name), ...] 全市场 A 股。带本地缓存 + 网络容错。
+
+    - 优先用较新的本地缓存(避免每次联网; akshare 拉全市场列表偶发卡顿/断流,
+      曾导致盘前播报子步骤卡死数分钟);
+    - 仅缓存缺失/过期才联网刷新; 联网失败仍回退任意已有缓存, 不让流水线崩溃。
+    """
+    import json as _json
+    # 1) 优先本地缓存(较新)
+    if os.path.exists(_ALL_SYMBOLS_CACHE):
+        try:
+            age = time.time() - os.path.getmtime(_ALL_SYMBOLS_CACHE)
+            if age < _ALL_SYMBOLS_MAX_AGE:
+                with open(_ALL_SYMBOLS_CACHE, "r", encoding="utf-8") as fh:
+                    return _json.load(fh)
+        except Exception:
+            pass
+    # 2) 缓存缺失/过期 → 联网拉取
+    try:
+        df = ak.stock_info_a_code_name()
+        code_col = "code" if "code" in df.columns else ("symbol" if "symbol" in df.columns else None)
+        name_col = "name" if "name" in df.columns else None
+        if code_col is None:
+            raise RuntimeError(f"无法识别代码列, columns={list(df.columns)}")
+        out = []
+        for _, row in df.iterrows():
+            code = str(row[code_col]).strip()
+            if not code.isdigit() or len(code) != 6:
+                continue
+            name = str(row[name_col]) if name_col else ""
+            out.append((code, name))
+        # 成功: 落本地缓存, 供后续兜底
+        try:
+            os.makedirs(os.path.dirname(_ALL_SYMBOLS_CACHE), exist_ok=True)
+            with open(_ALL_SYMBOLS_CACHE, "w", encoding="utf-8") as fh:
+                _json.dump(out, fh, ensure_ascii=False)
+        except Exception:
+            pass
+        return out
+    except Exception as e:
+        # 3) 联网失败 → 回退任意已有缓存(即使略旧)
+        if os.path.exists(_ALL_SYMBOLS_CACHE):
+            print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ⚠️ 拉取全市场列表失败({e}), 复用本地缓存")
+            with open(_ALL_SYMBOLS_CACHE, "r", encoding="utf-8") as fh:
+                return _json.load(fh)
+        raise
 
 
 def process(symbol, name, max_stale, force):

@@ -203,7 +203,7 @@ def check_candidate(cand, q, now):
 
 
 # ───────────────── 主流程 ─────────────────
-def run(top=15, rebuild=False, to_pool=False, symbols=None, verbose=True):
+def run(top=15, rebuild=False, to_pool=False, symbols=None, pool=False, verbose=True):
     now = datetime.now()
     now_str = now.strftime("%H:%M")
 
@@ -236,6 +236,18 @@ def run(top=15, rebuild=False, to_pool=False, symbols=None, verbose=True):
         print("\n".join(lines))
         print("#NO_PUSH#")
         return {"date": now.strftime("%Y-%m-%d"), "count": 0, "triggered": [], "near": []}
+
+    # 池子过滤模式: 只对当前策略股票池标的做 S14 检测(跳过全市场裸扫, 不污染池子)
+    if pool:
+        try:
+            from plans.stock_pool import load_pool
+            pool_syms = [e["symbol"] for e in load_pool().get("entries", []) if e.get("symbol")]
+            if verbose:
+                print(f"  🔍 池子过滤模式: 载入策略池 {len(pool_syms)} 只, 仅对这些做 S14 三角形检测")
+            symbols = list(dict.fromkeys((symbols or []) + pool_syms))  # 合并显式+池子, 去重保序
+        except Exception as e:
+            if verbose:
+                print(f"  ⚠️ 读取策略池失败: {e}, 回退全市场扫描")
 
     # 候选宇宙
     if rebuild and os.path.exists(CAND_PATH):
@@ -391,11 +403,13 @@ def main():
     ap.add_argument("--to-pool", action="store_true",
                     help="把新触发突破的标的加入策略股票池(供 intraday_watch 监控)")
     ap.add_argument("--symbols", nargs="*", help="直接指定股票代码(跳过全市场扫描)")
+    ap.add_argument("--pool", action="store_true",
+                    help="只对当前策略股票池(data/stock_pool.json)标的做 S14 检测(跳过全市场裸扫)")
     ap.add_argument("--json", action="store_true", help="JSON 输出")
     args = ap.parse_args()
 
     res = run(top=args.top, rebuild=args.rebuild, to_pool=args.to_pool,
-              symbols=args.symbols, verbose=not args.json)
+              symbols=args.symbols, pool=args.pool, verbose=not args.json)
     if args.json:
         print(json.dumps(res, ensure_ascii=False, indent=2))
 

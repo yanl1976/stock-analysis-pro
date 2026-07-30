@@ -18,7 +18,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Root = Resolve-Path (Join-Path $PSScriptRoot "..")
+$Root = $PSScriptRoot   # 本脚本即位于 stock-analysis-pro 根目录, 工作目录应为其自身
 $SchedulerPy = Join-Path $Root "scripts\scheduler.py"
 
 # 解析 python 可执行文件

@@ -103,7 +103,7 @@
   -          周热点回测      周五18:00 每周五     是        否     周度热点板块回测(无推送)
   盘前        盘前播报        08:30    每个交易日 是        是     落盘更新 + 宏观研判
   早盘        早盘播报        11:30    每个交易日 是        是     自选异动 + 热点突破(轻量快照)
-  午盘        午盘播报        15:00    每个交易日 是        是     自选异动 + 热点突破 + S14 三角形
+  午盘        午盘播报        14:30    每个交易日 是        是     自选异动 + S14三角形突破复核(只扫池)
   盘后        盘后播报        17:15    每个交易日 是        是     概念扫描→热度追踪→突破选股→池刷新→自选分析→复盘→决策
   注: 4 个推送窗口各自把多任务合并为一条流水线(命令键见 core.commands),
        输出汇总后统一推送一次企微, 每天仅 4 条定时推送。
@@ -263,36 +263,37 @@ TASKS = [
         "trading_day_only": True,
         "timeout": 3600,
         "notify": True,
+        "continue_on_error": True,
         "enabled": True,
         "desc": "盘前一条龙: 落盘K线更新 + 宏观研判(国际+国内+涨停池), 综合定调",
     },
     {
-        # 早盘: 出今日可买清单(蒸馏精选, 带买卖点) + 开盘异动跟踪
+        # 早盘: 蒸馏精选(今日可买清单) → 盘中异动监控 → S14 三角形过滤(只扫池子, 不裸扫)
         "name": "早盘播报",
         "window": "早盘",
-        "commands": ["daily_hotspot", "intraday_watch"],
-        "time": "11:30",
+        "commands": ["daily_hotspot", "intraday_watch", "s14"],
+        "time": "10:00",
         "interval": "每个交易日",
         "weekday": None,
         "trading_day_only": True,
         "timeout": 1800,
         "notify": True,
         "enabled": True,
-        "desc": "早盘: 每日热点蒸馏精选(今日可买清单+买卖点) + 自选/策略池异动",
+        "desc": "早盘: 热点蒸馏精选(可买清单) + 策略池异动监控 + S14三角形过滤蒸馏池",
     },
     {
-        # 午盘: 盘中只跟踪策略池信号(买点/止损/止盈触发) + 异动, 不再裸扫候选
+        # 午盘: 盘中跟踪策略池信号 + S14 三角形突破触发复核(只扫池子)
         "name": "午盘播报",
         "window": "午盘",
-        "commands": ["intraday_watch"],
-        "time": "15:00",
+        "commands": ["intraday_watch", "s14"],
+        "time": "14:30",
         "interval": "每个交易日",
         "weekday": None,
         "trading_day_only": True,
         "timeout": 600,
         "notify": True,
         "enabled": True,
-        "desc": "午盘: 跟踪策略池交易信号(买点/止损/止盈触发) + 异动, 推一次",
+        "desc": "午盘: 策略池信号跟踪(买卖点触发) + S14三角形盘中突破复核, 推一次",
     },
     {
         # 盘后: 收盘跟踪策略池信号(买卖点触发) + 池刷新 + 复盘 + 决策, 不再裸扫候选
@@ -445,13 +446,14 @@ def notify(title: str, body: str):
     """企微通知: 发【摘要卡片】+ 附【HTML 文件(完整详细内容)】, 不再堆文字。"""
     try:
         import asyncio
-        from notify.wecom_bot import build_client, load_chat_id, is_enabled, send_file_on_client
+        from notify.wecom_bot import build_client, load_chat_id, is_enabled, send_file_on_client, resolve_chat_id
     except Exception:
         return
     if not is_enabled():
         return
-    chat_id = load_chat_id()
+    chat_id = resolve_chat_id()
     if not chat_id:
+        log(f"[NOTIFY] 跳过(无有效 chat_id): {title} —— 请在接收推送的会话里 @机器人 一次以记录会话, 或在 .env 配置 WECOM_PUSH_CHAT_ID")
         return
 
     # HTML: 优先复用脚本自带报告, 否则由完整输出渲染
@@ -468,14 +470,26 @@ def notify(title: str, body: str):
         groups = [(title, body)]
 
     async def _push():
-        client = build_client()
+        client = build_client(push_mode=True)
+        # 等待认证真正完成(避免未认证就发); 10s 兜底
+        _authed = asyncio.Event()
+        try:
+            client.on("authenticated", lambda: _authed.set())
+        except Exception:
+            pass
         await client.connect()
-        await asyncio.sleep(2)
+        try:
+            await asyncio.wait_for(_authed.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            pass
         for g_title, g_body in groups:
             card = _build_card(g_title, g_body)
             await client.send_message(chat_id, {"msgtype": "markdown", "markdown": {"content": card}})
         if html_path and os.path.exists(html_path):
             await send_file_on_client(client, html_path, chat_id)
+        # 关键: 发送后保持连接片刻, 等 aibot 服务端异步转发到企微完成再断开,
+        # 否则立刻 disconnect 会打断转发(与 push_markdown_via_bot 同一根因)
+        await asyncio.sleep(4)
         client.disconnect()
 
     try:

@@ -40,9 +40,9 @@ COMMANDS = {
         "desc": "盘中热点突破扫描(轻量 5 板块)",
     },
     "s14": {
-        "args": ["plans/intraday_select.py", "--top", "15"],
+        "args": ["plans/intraday_select.py", "--top", "15", "--pool", "--to-pool"],
         "html": False, "no_browser": False,
-        "desc": "三角形突破选股(S14 同源 detect_triangle)",
+        "desc": "S14 三角形突破: 只对蒸馏精选池做检测(过滤器, 不裸扫全市场)",
     },
     "concept_list": {
         "args": ["core/cli.py", "concept", "--stage", "list", "--top", "10"],
