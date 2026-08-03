@@ -15,9 +15,11 @@
 COMMANDS = {
     # ============ 调度器 / bot 共用(定时任务)+ 交互 ============
     "update_klines": {
-        "args": ["scripts/fetch_all_klines.py", "--max-stale", "7", "--workers", "6"],
+        # max-stale 2: 保证 K 线最多滞后约 1 个交易日(周五→周一 3天 / 周四 6天 都会重抓)。
+        # 原为 7 → 仅"超过7天没交易"才刷新, 导致盘中选股长期吃旧 K 线(见 self_check.py 修复记录)。
+        "args": ["scripts/fetch_all_klines.py", "--max-stale", "2", "--workers", "6"],
         "html": False, "no_browser": False,
-        "desc": "增量刷新全市场 A 股日线 K 线落盘",
+        "desc": "增量刷新全市场 A 股日线 K 线落盘(新鲜度<=2天)",
     },
     "macro": {
         "args": ["plans/macro_report.py"],
@@ -88,6 +90,12 @@ COMMANDS = {
         "args": ["plans/weekly_hotspot.py", "--daily"],
         "html": True, "no_browser": False,
         "desc": "每日热点选股(蒸馏精选, 出今日可买清单, 带买卖点)",
+    },
+
+    "redistill": {
+        "args": ["scripts/redistill.py", "--push"],
+        "html": False, "no_browser": False,
+        "desc": "walk-forward 重蒸馏参数建议(只建议不改代码, 报告落盘+摘要推送)",
     },
 
     # ============ bot 交互专用(不进定时调度) ============

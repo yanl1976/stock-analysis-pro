@@ -432,8 +432,10 @@ REGIME_STRATEGY = {
         "position_scale": 1.0,
     },
     "震荡": {
-        "label": "高胜率共振",
-        "desc": "大盘纠缠震荡, 仅高胜率共振(S3)有正期望(56%/+2.97%), 边薄。降仓位、严止损。",
+        "label": "突破启动+强趋势低波(S2+S6)",
+        "desc": "大盘纠缠震荡, 2026-07-30 13个月 walk-forward 重蒸馏结论: 突破/即将启动(S2)"
+                "60%胜率/+5.84% 最优, 强趋势低波动(S6) 59%/+3.71% 次优; 组合 S2+S6 为震荡市"
+                "数据最优。降仓位(0.6)、严止损。原 S3b(金叉放宽)仅50%/+2.58%已弃用。",
         "position_scale": 0.6,
     },
     "空头": {
@@ -448,6 +450,51 @@ REGIME_STRATEGY = {
         "position_scale": 0.6,
     },
 }
+
+# ───────────────── 自适应路由配置(实盘当前组合) ─────────────────
+# 由 scripts/redistill.py 带护栏地自动维护(连续 N 周一致 + 样本达标才写回);
+# 缺失/损坏时回退 DEFAULT_REGIME_ROUTING。apply_regime_strategy 每次【实时读取】,
+# 故自适应写回后无需重启 daemon 即生效。
+ROUTING_CONFIG_PATH = os.path.join(DATA_DIR, "regime_routing.json")
+DEFAULT_REGIME_ROUTING = {
+    "多头": ["S5 趋势回调低吸", "S6 强趋势低波动", "S9 箱体突破"],
+    "震荡": ["S2 突破/即将启动", "S6 强趋势低波动"],
+    "空头": [],
+}
+# 依赖 K 线(无 kl 候选会被过滤)的策略: 调用前按 c.get("kl") 过滤(与原硬编码行为一致)
+_STRAT_NEEDS_KL = {"S5 趋势回调低吸"}
+
+_STRAT_NAME_MAP_CACHE = None
+
+
+def _strat_name_map():
+    """策略名→函数 映射(全部 S0~S9), 懒加载以规避与 backtest_hotspot 的循环导入。"""
+    global _STRAT_NAME_MAP_CACHE
+    if _STRAT_NAME_MAP_CACHE is None:
+        from plans.backtest_hotspot import STRATEGIES as _BH
+        _STRAT_NAME_MAP_CACHE = {name: func for name, func in _BH}
+    return _STRAT_NAME_MAP_CACHE
+
+
+def load_regime_routing() -> dict:
+    """实时读取实盘路由配置(每次调用); 无效策略名丢弃并告警, 缺省回退 DEFAULT。"""
+    try:
+        with open(ROUTING_CONFIG_PATH, encoding="utf-8") as f:
+            cfg = json.load(f)
+        if not isinstance(cfg, dict):
+            raise ValueError("路由配置非 dict")
+    except Exception:
+        return dict(DEFAULT_REGIME_ROUTING)
+    smap = _strat_name_map()
+    out = {}
+    for rg in ("多头", "震荡", "空头"):
+        names = cfg.get(rg, DEFAULT_REGIME_ROUTING[rg])
+        valid = [n for n in names if n in smap]
+        if len(valid) != len(names):
+            print(f"[路由] 警告: {rg} 含未知策略名 {set(names) - set(valid)} 已忽略",
+                  file=sys.stderr)
+        out[rg] = valid
+    return out
 
 
 def market_regime():
@@ -475,20 +522,21 @@ def market_regime():
 def apply_regime_strategy(candidates, regime, buy_date):
     """按大盘状态路由到蒸馏策略, 返回最终推荐候选 (空头返回空列表=空仓)。
 
-    直接复用 backtest_hotspot 的 strat_* 函数 (与回测同源, 保证口径一致)。
+    组合来自 data/regime_routing.json(由 redistill 带护栏自适应维护), 每次实时读取;
+    降级用 DEFAULT_REGIME_ROUTING。策略名→函数经 STRAT_NAME_MAP 解析, 复用回测同源 strat_*。
     """
-    from plans.backtest_hotspot import strat_pullback, strat_steady, strat_highwr, strat_box_breakout
     if regime == "空头":
         return []
-    if regime == "多头":
-        # 顺势低吸: 回调低吸(S5) ∪ 强趋势低波动(S6) ∪ 箱体突破(S9), 去重
-        pb = [c for c in candidates if c.get("kl")]
-        picks = strat_pullback(pb, runup_pct=40, buy_date=buy_date)
-        picks += strat_steady(candidates, runup_pct=40, buy_date=buy_date)
-        picks += strat_box_breakout(candidates, runup_pct=40, buy_date=buy_date)
-    else:  # 震荡 / 未知 → 高胜率共振(S3) ∪ 箱体突破(S9)
-        picks = strat_highwr(candidates, runup_pct=40, buy_date=buy_date)
-        picks += strat_box_breakout(candidates, runup_pct=40, buy_date=buy_date)
+    routing = load_regime_routing()
+    names = routing.get(regime) or routing.get("未知", [])
+    picks = []
+    for nm in names:
+        fn = _strat_name_map().get(nm)
+        if fn is None:
+            continue
+        # S5 回调低吸依赖 K 线, 无 kl 候选先过滤(与原硬编码行为一致)
+        pool = [c for c in candidates if c.get("kl")] if nm in _STRAT_NEEDS_KL else candidates
+        picks += fn(pool, runup_pct=40, buy_date=buy_date)
     seen = set()
     out = []
     for c in picks:

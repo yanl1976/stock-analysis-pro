@@ -349,7 +349,7 @@ def select_on(buy_date, hotspots, top_n, per, score_filter,
                 continue
             wr = _estimate_win_rate(res["stage"], res["signals"])
             rating = _rating(res["score"], wr, res["stage"])
-            buy, stop, stop_pct, position = _build_plan(
+            buy, stop, stop_pct, position, _bl = _build_plan(
                 {"price": price_b, "stage": res["stage"], "change_pct": chg_b},
                 wr, rating)
             tp, sell_hint = _sell_hint(price_b, res["stage"], stop)
@@ -584,12 +584,23 @@ def strat_breakout(pool, runup_pct=40, buy_date=None):
             and not _not_chase(c, runup_pct)]
 
 
-def strat_highwr(pool, runup_pct=40, buy_date=None):
-    """S3 高胜率共振: 估算成功率≥60% 且 双金叉(MACD/KDJ)之一"""
-    return [c for c in pool
-            if c["win_rate"] >= 0.60
-            and (c["details"].get("macd_gc") or c["details"].get("kdj_gc"))
-            and not _not_chase(c, runup_pct)]
+def strat_highwr(pool, runup_pct=40, buy_date=None, require_gc=True):
+    """S3 高胜率共振: 估算成功率≥60%; require_gc=True 时另需双金叉(MACD/KDJ)之一。
+
+    2026-07-30 用户授权: 实盘震荡市门控放宽金叉(require_gc=False, 见
+    weekly_hotspot.apply_regime_strategy), 胜率≥60% 保持不变;
+    回测 STRATEGIES 里的 S3 默认仍 require_gc=True, 保持历史口径可比。
+    """
+    out = []
+    for c in pool:
+        if c["win_rate"] < 0.60:
+            continue
+        if require_gc and not (c["details"].get("macd_gc") or c["details"].get("kdj_gc")):
+            continue
+        if _not_chase(c, runup_pct):
+            continue
+        out.append(c)
+    return out
 
 
 def strat_squeeze(pool, runup_pct=40, buy_date=None):
@@ -720,7 +731,7 @@ def _apply_plan(p, stop_pct, tp_pct, trailing_pct=None):
     """给候选附加纪律买卖参数 (止损/止盈/移动止损比例可参数化, 供优化扫描)"""
     wr = p["win_rate"]
     rating = p["rating"]
-    buy, _stop0, _sp0, position = _build_plan(
+    buy, _stop0, _sp0, position, _bl0 = _build_plan(
         {"price": p["price_b"], "stage": p["stage"], "change_pct": p["chg_b"]}, wr, rating)
     price = p["price_b"]
     stop = round(price * (1 - stop_pct), 2)

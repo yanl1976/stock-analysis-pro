@@ -239,6 +239,21 @@ TASKS = [
         "desc": "扫描落盘 K 线, 统计 stale_accepted(退市/停牌)/short_history(次新), 输出清单",
     },
     {
+        # 重蒸馏: walk-forward 回看最近13个月, 按大盘三状态拆策略胜率, 产出参数建议
+        # (只建议不改代码; 报告落盘 data/reports/redistill_*.md + data/redistill_suggestions.json,
+        #  脚本自带 --push 推摘要卡片, 故本任务 notify=False 避免双推)
+        "name": "周末重蒸馏",
+        "commands": ["redistill", "--step-days", "20", "--push"],
+        "time": "10:00",
+        "interval": "每周六",
+        "weekday": [5],
+        "trading_day_only": False,
+        "timeout": 3600,
+        "notify": False,
+        "enabled": True,
+        "desc": "walk-forward 重蒸馏参数建议(机器建议人工拍板, 摘要自行推送)",
+    },
+    {
         "name": "周热点回测",
         "commands": ["weekly_hotspot"],
         "time": "18:00",
