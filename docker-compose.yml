@@ -1,0 +1,70 @@
+# stock-analysis-pro 多服务编排
+# 目标机部署目录: /opt/stock-analysis-pro
+# 用法:
+#   docker compose build
+#   docker compose up -d
+# 升级:
+#   docker compose build && docker compose up -d
+
+services:
+  # ── Web 仪表盘 (Flask, 内部端口 8500) ──
+  web:
+    build: .
+    image: stock-analysis-pro:latest
+    container_name: sap_web
+    restart: unless-stopped
+    environment:
+      - DASHBOARD_HOST=0.0.0.0
+      - DASHBOARD_PORT=8500
+      - DASHBOARD_DEBUG=false
+    ports:
+      - "8500:8500"
+    volumes:
+      # 持久化数据 (池/缓存/报告) — 命名卷, 重建容器不丢
+      - sap_data:/opt/stock-analysis-pro/data
+      - sap_cache:/opt/stock-analysis-pro/cache
+      # 敏感配置只读挂载 (不进镜像)
+      - ./.env:/opt/stock-analysis-pro/.env:ro
+      - ./config/config.yaml:/opt/stock-analysis-pro/config/config.yaml:ro
+      - ./config/user.yaml:/opt/stock-analysis-pro/config/user.yaml:ro
+    networks:
+      - sap_net
+
+  # ── 统一定时调度器 (企微推送常驻, 非 web) ──
+  scheduler:
+    image: stock-analysis-pro:latest
+    container_name: sap_scheduler
+    restart: unless-stopped
+    command: ["python", "scripts/scheduler.py", "--daemon"]
+    volumes:
+      - sap_data:/opt/stock-analysis-pro/data
+      - sap_cache:/opt/stock-analysis-pro/cache
+      - ./.env:/opt/stock-analysis-pro/.env:ro
+      - ./config/config.yaml:/opt/stock-analysis-pro/config/config.yaml:ro
+      - ./config/user.yaml:/opt/stock-analysis-pro/config/user.yaml:ro
+    networks:
+      - sap_net
+
+  # ── 企微智能机器人 交互常驻 (WebSocket 接收 @消息, 需 WECOM_AIBOT_ENABLED=1) ──
+  # 未启用时脚本自身 is_enabled() 会干净退出(退出码0); on-failure 不会反复重启
+  bot:
+    image: stock-analysis-pro:latest
+    container_name: sap_bot
+    restart: on-failure
+    command: ["python", "notify/wecom_bot.py"]
+    volumes:
+      - sap_data:/opt/stock-analysis-pro/data
+      - sap_cache:/opt/stock-analysis-pro/cache
+      - ./.env:/opt/stock-analysis-pro/.env:ro
+      - ./config/config.yaml:/opt/stock-analysis-pro/config/config.yaml:ro
+      - ./config/user.yaml:/opt/stock-analysis-pro/config/user.yaml:ro
+    networks:
+      - sap_net
+
+volumes:
+  sap_data:
+  sap_cache:
+
+networks:
+  sap_net:
+    driver: bridge
