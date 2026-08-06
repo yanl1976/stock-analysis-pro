@@ -15,11 +15,13 @@
 COMMANDS = {
     # ============ 调度器 / bot 共用(定时任务)+ 交互 ============
     "update_klines": {
-        # max-stale 2: 保证 K 线最多滞后约 1 个交易日(周五→周一 3天 / 周四 6天 都会重抓)。
-        # 原为 7 → 仅"超过7天没交易"才刷新, 导致盘中选股长期吃旧 K 线(见 self_check.py 修复记录)。
-        "args": ["scripts/fetch_all_klines.py", "--max-stale", "2", "--workers", "6"],
+        # max-stale 7: 仅"超过7天没交易"才重抓, 日常盘前只刷极少量过期票 → 秒级完成,
+        # 不阻塞后续 macro 推送(此前 max-stale=2 导致每天盘前全市场5500+只全量重抓, 远超300s,
+        # macro 子步骤永远排不到, 微信盘前播报收不到)。
+        # 盘中选股/回测主要消费历史 K 线(当日未收盘本就不该用于选股), 7天窗口足够新鲜。
+        "args": ["scripts/fetch_all_klines.py", "--max-stale", "7", "--workers", "8"],
         "html": False, "no_browser": False,
-        "desc": "增量刷新全市场 A 股日线 K 线落盘(新鲜度<=2天)",
+        "desc": "增量刷新全市场 A 股日线 K 线落盘(新鲜度<=7天)",
     },
     "macro": {
         "args": ["plans/macro_report.py"],
