@@ -268,19 +268,36 @@ TASKS = [
 
     # ---------- 四大推送窗口 ----------
     {
-        # 盘前: 落盘更新 + 宏观研判, 盘前定调
+        # 盘前: 仅宏观研判(盘前定调)。K线刷新已独立拆为低频后台任务(见 kline_refresh),
+        # 避免 fetch_all_klines 全市场重抓(跨网极慢, 远超5分钟)阻塞 macro 推送(致微信收不到盘前播报)。
         "name": "盘前播报",
         "window": "盘前",
-        "commands": ["update_klines", "macro"],
+        "commands": ["macro"],
         "time": "08:30",
         "interval": "每个交易日",
         "weekday": None,
         "trading_day_only": True,
-        "timeout": 3600,
+        "timeout": 600,
         "notify": True,
         "continue_on_error": True,
         "enabled": True,
-        "desc": "盘前一条龙: 落盘K线更新 + 宏观研判(国际+国内+涨停池), 综合定调",
+        "desc": "盘前定调: 宏观研判(国际+国内+涨停池), 综合定调 (K线刷新见独立低频任务)",
+    },
+    {
+        # K线刷新: 独立低频后台任务, 不推送。盘前播报已不再依赖它, 避免阻塞。
+        # 每日 03:20 跑(早于盘前08:30), 平时只刷少量过期票; 周末另设全量重建由 redistill 复用缓存。
+        "name": "K线刷新",
+        "window": "盘前",
+        "commands": ["update_klines"],
+        "time": "03:20",
+        "interval": "每天",
+        "weekday": None,
+        "trading_day_only": False,
+        "timeout": 3600,
+        "notify": False,
+        "continue_on_error": True,
+        "enabled": True,
+        "desc": "低频后台: 增量刷新全市场K线落盘(不推送, 供盘前/选股消费)",
     },
     {
         # 早盘: 蒸馏精选(今日可买清单) → 盘中异动监控 → S14 三角形过滤(只扫池子, 不裸扫)
